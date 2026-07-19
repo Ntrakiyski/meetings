@@ -56,6 +56,7 @@ export function useRecordingStop(
     flushBuffer,
     clearTranscripts,
     meetingTitle,
+    currentMeetingId,
     markMeetingAsSaved,
   } = useTranscripts();
 
@@ -253,10 +254,12 @@ export function useRecordingStop(
         });
 
         try {
+          await transcriptService.flushLivePublishing();
           const responseData = await storageService.saveMeeting(
             savedMeetingName || meetingTitle || 'New Meeting',  // PREFER savedMeetingName (backend source)
             freshTranscripts,
-            folderPath
+            folderPath,
+            currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id')
           );
 
           const meetingId = responseData.meeting_id;
@@ -428,6 +431,7 @@ export function useRecordingStop(
     flushBuffer,
     clearTranscripts,
     meetingTitle,
+    currentMeetingId,
     markMeetingAsSaved,
     refetchMeetings,
     setCurrentMeeting,

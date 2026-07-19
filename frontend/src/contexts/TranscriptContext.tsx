@@ -107,6 +107,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
             // Use a better fallback that matches the backend's naming pattern
             const effectiveTitle = meetingName || `Meeting ${new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-')}`;
+            transcriptService.startLiveMeeting(meetingId, effectiveTitle);
 
             // Initialize meeting metadata in IndexedDB
             await indexedDBService.saveMeetingMetadata({
@@ -320,6 +321,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
           // Add to buffer
           transcriptBuffer.set(update.sequence_id, newTranscript);
+          transcriptService.publishLiveTranscript(update);
           console.log(`✅ MAIN LISTENER: Buffered transcript with sequence_id ${update.sequence_id}. Buffer size: ${transcriptBuffer.size}, Last processed: ${lastProcessedSequence}`);
 
           // Save to IndexedDB (non-blocking)

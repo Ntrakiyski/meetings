@@ -1,6 +1,7 @@
 use crate::api::TranscriptSegment;
 use crate::database::repositories::meeting::MeetingsRepository;
 use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::time::Duration;
@@ -9,6 +10,18 @@ const DEFAULT_INGEST_URL: &str =
     "https://4ksznmsh.eu-central.insforge.app/functions/meetily";
 const KEYCHAIN_ACCOUNT: &str = "meetily";
 const KEYCHAIN_SERVICE: &str = "connections-api-key";
+static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("valid Connections HTTP client")
+});
+static API_KEY: Lazy<Option<String>> = Lazy::new(|| {
+    std::env::var("MEETILY_CONNECTIONS_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(keychain_api_key)
+});
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,9 +55,7 @@ pub async fn publish_meeting(
         return Ok(());
     }
 
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?
+    let response = HTTP_CLIENT
         .post(url)
         .bearer_auth(api_key)
         .json(&MeetingPayload {
@@ -61,6 +72,22 @@ pub async fn publish_meeting(
         return Err(anyhow!("Connections ingest returned {}", response.status()));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn api_publish_live_transcript(
+    external_id: String,
+    title: String,
+    transcripts: Vec<serde_json::Value>,
+) -> std::result::Result<(), String> {
+    let segments = transcripts
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<TranscriptSegment>, _>>()
+        .map_err(|error| format!("Invalid live transcript segment: {error}"))?;
+    publish_meeting(&external_id, &title, &segments, None)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub async fn publish_saved_meeting(
@@ -88,10 +115,7 @@ pub async fn publish_saved_meeting(
 }
 
 fn api_key() -> Option<String> {
-    std::env::var("MEETILY_CONNECTIONS_API_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(keychain_api_key)
+    API_KEY.as_ref().cloned()
 }
 
 #[cfg(target_os = "macos")]

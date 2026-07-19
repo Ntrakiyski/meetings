@@ -15,8 +15,11 @@ impl TranscriptsRepository {
         meeting_title: &str,
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
+        meeting_id: Option<String>,
     ) -> Result<String, SqlxError> {
-        let meeting_id = format!("meeting-{}", Uuid::new_v4());
+        let meeting_id = meeting_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("meeting-{}", Uuid::new_v4()));
 
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;

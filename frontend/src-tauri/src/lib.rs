@@ -650,6 +650,7 @@ pub fn run() {
             api::api_get_meeting_transcripts,
             api::api_save_meeting_title,
             api::api_save_transcript,
+            connections::api_publish_live_transcript,
             api::open_meeting_folder,
             api::test_backend_connection,
             api::debug_backend_connection,

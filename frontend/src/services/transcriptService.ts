@@ -30,6 +30,47 @@ export interface ModelDownloadCompletePayload {
  * Singleton service for managing transcription operations and transcript history
  */
 export class TranscriptService {
+  private liveMeeting: { externalId: string; title: string; transcripts: Transcript[] } | null = null;
+  private livePublishChain: Promise<void> = Promise.resolve();
+
+  startLiveMeeting(externalId: string, title: string): void {
+    this.liveMeeting = { externalId, title, transcripts: [] };
+  }
+
+  publishLiveTranscript(update: TranscriptUpdate): void {
+    if (!this.liveMeeting) return;
+
+    this.liveMeeting.transcripts.push({
+      id: String(update.sequence_id),
+      text: update.text,
+      timestamp: update.timestamp,
+      sequence_id: update.sequence_id,
+      speaker: update.source,
+      audio_start_time: update.audio_start_time,
+      audio_end_time: update.audio_end_time,
+      duration: update.duration,
+    });
+    const payload = {
+      externalId: this.liveMeeting.externalId,
+      title: this.liveMeeting.title,
+      transcripts: this.liveMeeting.transcripts.map(segment => ({ ...segment })),
+    };
+    this.livePublishChain = this.livePublishChain
+      .then(async () => {
+        await invoke('api_publish_live_transcript', payload);
+      })
+      .catch(error => console.warn('Live Connections publish failed:', error));
+  }
+
+  async flushLivePublishing(): Promise<void> {
+    for (;;) {
+      const pending = this.livePublishChain;
+      await pending;
+      if (pending === this.livePublishChain) break;
+    }
+    this.liveMeeting = null;
+  }
+
   /**
    * Get transcript history from backend (for reload sync)
    * @returns Promise<Transcript[]>

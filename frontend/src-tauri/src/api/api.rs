@@ -938,6 +938,7 @@ pub async fn api_save_transcript<R: Runtime>(
     meeting_title: String,
     transcripts: Vec<serde_json::Value>,
     folder_path: Option<String>,
+    meeting_id: Option<String>,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
@@ -983,6 +984,7 @@ pub async fn api_save_transcript<R: Runtime>(
         &meeting_title,
         &transcripts_to_save,
         folder_path,
+        meeting_id,
     )
     .await
     {

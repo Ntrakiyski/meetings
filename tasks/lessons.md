@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-07-19 - Parenthesize jq pipelines inside boolean assertions
+
+Mistake: Wrote a combined `jq -e` assertion whose pipe precedence applied `length` to the intermediate boolean instead of the segment array.
+Why it happened: Combined row-count and segment-count checks without grouping the nested pipeline.
+Rule for next time: Parenthesize each piped subexpression before joining it with `and` or `or`.
+Example check: `.meetings | (length == 1 and (.[0].transcript_segments | length == 2))` evaluates both intended arrays.
+
 ## 2026-07-19 - Pass the source file when deploying an InsForge function
 
 Mistake: Invoked `functions deploy meetily` without the CLI's required `--file` option.
