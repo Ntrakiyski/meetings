@@ -3,19 +3,29 @@
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir } from '@tauri-apps/api/path';
 import { useCallback, useEffect, useState, useRef } from 'react';
-import { Play, Pause, Square, Mic, AlertCircle, X } from 'lucide-react';
+import { Play, Pause, Square, Mic, AlertCircle, X, Check, Ellipsis } from 'lucide-react';
 import { ProcessRequest, SummaryResponse } from '@/types/summary';
 import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import Analytics from '@/lib/analytics';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useConfig } from '@/contexts/ConfigContext';
+import { writePinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
+
+const RECORDING_LANGUAGE_OPTIONS = [
+  { code: 'bg', label: 'Bulgarian' },
+  { code: 'en', label: 'English' },
+] as const;
+
+type RecordingLanguage = (typeof RECORDING_LANGUAGE_OPTIONS)[number]['code'];
 
 interface RecordingControlsProps {
   isRecording: boolean;
   barHeights: string[];
   onRecordingStop: (callApi?: boolean) => void;
-  onRecordingStart: () => void;
+  onRecordingStart: (language?: string) => Promise<void>;
   onTranscriptReceived: (summary: SummaryResponse) => void;
   onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
@@ -44,6 +54,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   // Use global recording state context for pause state (syncs with tray operations)
   const recordingState = useRecordingState();
   const isPaused = recordingState.isPaused;
+  const { selectedLanguage, setSelectedLanguage } = useConfig();
 
   const [showPlayback, setShowPlayback] = useState(false);
   const [recordingPath, setRecordingPath] = useState<string | null>(null);
@@ -58,6 +69,47 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isValidatingModel, setIsValidatingModel] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
   const [deviceError, setDeviceError] = useState<{ title: string, message: string } | null>(null);
+  const [recordingLanguages, setRecordingLanguages] = useState<RecordingLanguage[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = JSON.parse(localStorage.getItem('recordingLanguages') ?? '[]');
+        if (Array.isArray(saved)) {
+          const supported = saved.filter((language): language is RecordingLanguage =>
+            language === 'bg' || language === 'en'
+          );
+          if (supported.length > 0) return supported;
+        }
+      } catch {
+        // A malformed old preference should not block recording.
+      }
+    }
+    return selectedLanguage === 'en' ? ['en'] : ['bg'];
+  });
+
+  const transcriptionLanguage = recordingLanguages.length === 1
+    ? recordingLanguages[0]
+    : 'auto';
+
+  useEffect(() => {
+    localStorage.setItem('recordingLanguages', JSON.stringify(recordingLanguages));
+    if (selectedLanguage !== transcriptionLanguage) {
+      setSelectedLanguage(transcriptionLanguage);
+    }
+    // Summaries have one output language. Bulgarian remains the default for
+    // bilingual meetings, while an English-only meeting gets an English summary.
+    writePinnedSummaryLanguageDefault(
+      recordingLanguages.includes('en') && !recordingLanguages.includes('bg') ? 'en' : 'bg'
+    );
+  }, [recordingLanguages, selectedLanguage, setSelectedLanguage, transcriptionLanguage]);
+
+  const toggleRecordingLanguage = (language: RecordingLanguage) => {
+    setRecordingLanguages((current) => {
+      if (current.includes(language)) {
+        return current.length === 1 ? current : current.filter((item) => item !== language);
+      }
+      return [...current, language];
+    });
+  };
 
   const currentTime = 0;
   const duration = 0;
@@ -100,7 +152,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       // 2. Show appropriate toast/modal
       // 3. Call backend if valid
       // 4. Update UI state
-      await onRecordingStart();
+      await onRecordingStart(transcriptionLanguage);
     } catch (error) {
       console.error('Failed to start recording:', error);
       console.error('Error details:', {
@@ -135,7 +187,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         });
       }
     }
-  }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording]);
+  }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording, transcriptionLanguage]);
 
   const stopRecordingAction = useCallback(async () => {
     console.log('Executing stop recording...');
@@ -471,19 +523,65 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </>
                   )}
 
-                  <div className="flex items-center space-x-1 mx-4">
-                    {barHeights.map((height, index) => (
-                      <div
-                        key={index}
-                        className={`w-1 rounded-full transition-all duration-200 ${isPaused ? 'bg-orange-500' : 'bg-red-500'
-                          }`}
-                        style={{
-                          height: isRecording && !isPaused ? height : '4px',
-                          opacity: isPaused ? 0.6 : 1,
-                        }}
-                      />
-                    ))}
-                  </div>
+                  {!isRecording ? (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Choose recording languages"
+                          className="ml-2 flex h-10 w-10 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+                        >
+                          <Ellipsis size={24} aria-hidden="true" />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent side="top" align="center" className="w-64 p-3">
+                        <p className="text-sm font-semibold text-gray-900">Meeting language</p>
+                        <p className="mt-1 text-xs leading-5 text-gray-500">
+                          Choose the language spoken in this meeting.
+                        </p>
+                        <div className="mt-3 space-y-1">
+                          {RECORDING_LANGUAGE_OPTIONS.map((language) => {
+                            const checked = recordingLanguages.includes(language.code);
+                            return (
+                              <button
+                                key={language.code}
+                                type="button"
+                                role="checkbox"
+                                aria-checked={checked}
+                                onClick={() => toggleRecordingLanguage(language.code)}
+                                className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-gray-800 transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+                              >
+                                <span
+                                  className={`flex h-5 w-5 items-center justify-center rounded border ${
+                                    checked
+                                      ? 'border-red-500 bg-red-500 text-white'
+                                      : 'border-gray-300 bg-white text-transparent'
+                                  }`}
+                                >
+                                  <Check size={14} strokeWidth={3} aria-hidden="true" />
+                                </span>
+                                {language.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  ) : (
+                    <div className="flex items-center space-x-1 mx-4">
+                      {barHeights.map((height, index) => (
+                        <div
+                          key={index}
+                          className={`w-1 rounded-full transition-all duration-200 ${isPaused ? 'bg-orange-500' : 'bg-red-500'
+                            }`}
+                          style={{
+                            height: !isPaused ? height : '4px',
+                            opacity: isPaused ? 0.6 : 1,
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </>

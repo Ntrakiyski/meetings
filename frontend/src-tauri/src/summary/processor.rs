@@ -90,6 +90,7 @@ pub(crate) fn language_name_from_code(code: &str) -> Option<&'static str> {
     match lookup {
         "en" => Some("English"),
         "zh" => Some("Chinese"),
+        "bg" => Some("Bulgarian"),
         "de" => Some("German"),
         "es" => Some("Spanish"),
         "ru" => Some("Russian"),
@@ -846,6 +847,11 @@ mod tests {
     #[test]
     fn uppercase_english_code_returns_none() {
         assert_eq!(resolve_cached_english(Some("body"), Some("EN")), None);
+    }
+
+    #[test]
+    fn bulgarian_translation_code_returns_cache() {
+        assert_eq!(resolve_cached_english(Some("body"), Some("bg")), Some("body"));
     }
 
     #[test]

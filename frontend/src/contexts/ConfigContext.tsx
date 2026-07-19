@@ -140,7 +140,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('primaryLanguage');
-      return saved || 'auto';
+      return saved || 'bg';
     }
     return 'auto';
   });
@@ -211,7 +211,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadTranscriptConfig();
   }, []);
 
-  // Sync language preference to Rust on mount (fixes startup desync bug)
+  // Sync language preference to Rust on mount (fixes startup desync bug).
+  // Bulgarian is the default for new installations; existing saved choices remain intact.
   useEffect(() => {
     if (selectedLanguage) {
       invoke('set_language_preference', { language: selectedLanguage })

@@ -130,10 +130,12 @@ export function LanguageSelection({
   const [saving, setSaving] = useState(false);
   const { setSelectedLanguage } = useConfig();
 
-  // Parakeet only supports auto-detection (doesn't support manual language selection)
+  // Parakeet v3 auto-detects its supported European languages. Keep the two
+  // meeting languages available here so this setting remains consistent with
+  // the pre-recording picker.
   const isParakeet = provider === 'parakeet';
   const availableLanguages = isParakeet
-    ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
+    ? LANGUAGES.filter(lang => ['auto', 'auto-translate', 'bg', 'en'].includes(lang.code))
     : LANGUAGES;
 
   const handleLanguageChange = async (languageCode: string) => {
@@ -197,11 +199,11 @@ export function LanguageSelection({
           ))}
         </select>
 
-        {/* Parakeet language limitation warning */}
+        {/* Parakeet language behavior */}
         {isParakeet && (
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
             <p className="font-medium">ℹ️ Parakeet Language Support</p>
-            <p className="mt-1 text-xs">Parakeet currently only supports automatic language detection. Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
+            <p className="mt-1 text-xs">Parakeet automatically detects Bulgarian and English. The recording language picker sets the meeting preference; it does not suppress occasional English terms such as product names.</p>
           </div>
         )}
 

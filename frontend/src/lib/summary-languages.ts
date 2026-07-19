@@ -12,6 +12,7 @@ export const LANGUAGE_OPTIONS: LanguageOption[] = [
   { code: 'en', label: 'English' },
   { code: 'zh', label: 'Chinese' },
   { code: 'zh-tw', label: 'Traditional Chinese' },
+  { code: 'bg', label: 'Bulgarian' },
   { code: 'de', label: 'German' },
   { code: 'es', label: 'Spanish' },
   { code: 'ru', label: 'Russian' },

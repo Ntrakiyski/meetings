@@ -10,7 +10,7 @@ import { showRecordingNotification } from '@/lib/recordingNotification';
 import { toast } from 'sonner';
 
 interface UseRecordingStartReturn {
-  handleRecordingStart: () => Promise<void>;
+  handleRecordingStart: (language?: string) => Promise<void>;
   isAutoStarting: boolean;
 }
 
@@ -80,9 +80,13 @@ export function useRecordingStart(
   }, []);
 
   // Handle manual recording start (from button click)
-  const handleRecordingStart = useCallback(async () => {
+  const handleRecordingStart = useCallback(async (language?: string) => {
     try {
       console.log('handleRecordingStart called - checking Parakeet model status');
+
+      if (language) {
+        await invoke('set_language_preference', { language });
+      }
 
       // Check if Parakeet transcription model is ready before starting
       const parakeetReady = await checkParakeetReady();
