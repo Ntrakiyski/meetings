@@ -420,7 +420,7 @@ export function ModelManager({
       {/* Basic Models */}
       <div className="space-y-3">
         {basicModels.map((model) => {
-          const isRecommended = model.name === 'base';
+          const isRecommended = model.name === 'large-v3-q5_0';
           return (
             <ModelCard
               key={model.name}

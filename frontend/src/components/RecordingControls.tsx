@@ -21,6 +21,9 @@ const RECORDING_LANGUAGE_OPTIONS = [
 
 type RecordingLanguage = (typeof RECORDING_LANGUAGE_OPTIONS)[number]['code'];
 
+const BULGARIAN_WHISPER_MODEL = 'large-v3-q5_0';
+const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+
 interface RecordingControlsProps {
   isRecording: boolean;
   barHeights: string[];
@@ -54,7 +57,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   // Use global recording state context for pause state (syncs with tray operations)
   const recordingState = useRecordingState();
   const isPaused = recordingState.isPaused;
-  const { selectedLanguage, setSelectedLanguage } = useConfig();
+  const { selectedLanguage, setSelectedLanguage, setTranscriptModelConfig } = useConfig();
 
   const [showPlayback, setShowPlayback] = useState(false);
   const [recordingPath, setRecordingPath] = useState<string | null>(null);
@@ -89,6 +92,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const transcriptionLanguage = recordingLanguages.length === 1
     ? recordingLanguages[0]
     : 'auto';
+  const transcriptionConfig = recordingLanguages.length === 1 && recordingLanguages[0] === 'bg'
+    ? { provider: 'localWhisper' as const, model: BULGARIAN_WHISPER_MODEL }
+    : { provider: 'parakeet' as const, model: PARAKEET_MODEL };
 
   useEffect(() => {
     localStorage.setItem('recordingLanguages', JSON.stringify(recordingLanguages));
@@ -147,6 +153,15 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     setSpeechDetected(false); // Reset speech detection on new recording
 
     try {
+      // Parakeet only auto-detects languages. Bulgarian-only meetings use the
+      // existing local Whisper engine with a real `bg` language constraint.
+      await invoke('api_save_transcript_config', {
+        provider: transcriptionConfig.provider,
+        model: transcriptionConfig.model,
+        apiKey: null,
+      });
+      setTranscriptModelConfig({ ...transcriptionConfig, apiKey: null });
+
       // Call the validation callback which will:
       // 1. Check if model is ready
       // 2. Show appropriate toast/modal
@@ -187,7 +202,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         });
       }
     }
-  }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording, transcriptionLanguage]);
+  }, [onRecordingStart, isStarting, isValidatingModel, selectedDevices, meetingName, isRecording, transcriptionLanguage, transcriptionConfig, setTranscriptModelConfig]);
 
   const stopRecordingAction = useCallback(async () => {
     console.log('Executing stop recording...');
@@ -537,7 +552,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <PopoverContent side="top" align="center" className="w-64 p-3">
                         <p className="text-sm font-semibold text-gray-900">Meeting language</p>
                         <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Choose the language spoken in this meeting.
+                          {transcriptionConfig.provider === 'localWhisper'
+                            ? 'Bulgarian uses Whisper Large V3 (1.1 GB) for the highest local accuracy.'
+                            : 'Bilingual meetings use fast automatic language detection.'}
                         </p>
                         <div className="mt-3 space-y-1">
                           {RECORDING_LANGUAGE_OPTIONS.map((language) => {
