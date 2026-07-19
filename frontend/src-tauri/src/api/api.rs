@@ -130,6 +130,8 @@ pub struct MeetingTranscript {
     pub id: String,
     pub text: String,
     pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
     // Recording-relative timestamps for audio-transcript synchronization
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_start_time: Option<f64>,
@@ -176,11 +178,13 @@ pub struct SaveTranscriptRequest {
     pub transcripts: Vec<TranscriptSegment>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TranscriptSegment {
     pub id: String,
     pub text: String,
     pub timestamp: String,
+    #[serde(default, alias = "source", skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
     // NEW: Recording-relative timestamps for playback synchronization
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_start_time: Option<f64>,
@@ -875,6 +879,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     id: t.id,
                     text: t.transcript,
                     timestamp: t.timestamp,
+                    speaker: t.speaker,
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
@@ -986,6 +991,21 @@ pub async fn api_save_transcript<R: Runtime>(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
             );
+            let publish_id = meeting_id.clone();
+            let publish_title = meeting_title.clone();
+            let publish_segments = transcripts_to_save.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::connections::publish_meeting(
+                    &publish_id,
+                    &publish_title,
+                    &publish_segments,
+                    None,
+                )
+                .await
+                {
+                    log::warn!("Failed to publish meeting to Connections: {}", error);
+                }
+            });
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",

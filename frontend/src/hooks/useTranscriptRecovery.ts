@@ -170,6 +170,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         chunk_start_time: (t as any).chunk_start_time,
         is_partial: (t as any).is_partial || false,
         confidence: t.confidence,
+        speaker: (t as any).source ?? (t as any).speaker,
         audio_start_time: (t as any).audio_start_time,
         audio_end_time: (t as any).audio_end_time,
         duration: (t as any).duration,

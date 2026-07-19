@@ -39,6 +39,7 @@ pub mod analytics;
 pub mod api;
 pub mod audio;
 pub mod config;
+pub mod connections;
 pub mod console_utils;
 pub mod database;
 pub mod notifications;

@@ -580,6 +580,20 @@ impl SummaryService {
                         "Summary saved successfully for meeting_id: {}",
                         meeting_id
                     );
+                    let publish_pool = pool.clone();
+                    let publish_id = meeting_id.clone();
+                    let publish_summary = final_markdown.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::connections::publish_saved_meeting(
+                            &publish_pool,
+                            &publish_id,
+                            Some(&publish_summary),
+                        )
+                        .await
+                        {
+                            warn!("Failed to publish meeting summary to Connections: {}", e);
+                        }
+                    });
                 }
             }
             Err(e) => {

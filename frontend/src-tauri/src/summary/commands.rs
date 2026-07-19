@@ -89,6 +89,24 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
             log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
+            let publish_pool = pool.clone();
+            let publish_id = meeting_id.clone();
+            let publish_summary = summary
+                .get("markdown")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| summary.to_string());
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::connections::publish_saved_meeting(
+                    &publish_pool,
+                    &publish_id,
+                    Some(&publish_summary),
+                )
+                .await
+                {
+                    log::warn!("Failed to publish meeting summary to Connections: {}", error);
+                }
+            });
             Ok(serde_json::json!({
                 "message": "Meeting summary saved successfully"
             }))
