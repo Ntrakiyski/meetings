@@ -31,6 +31,10 @@ struct MeetingPayload<'a> {
     transcript: String,
     transcript_segments: &'a [TranscriptSegment],
     #[serde(skip_serializing_if = "Option::is_none")]
+    raw_transcript: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_transcript_segments: Option<&'a [TranscriptSegment]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<&'a str>,
 }
 
@@ -38,6 +42,7 @@ pub async fn publish_meeting(
     external_id: &str,
     title: &str,
     segments: &[TranscriptSegment],
+    raw_segments: Option<&[TranscriptSegment]>,
     summary: Option<&str>,
 ) -> Result<()> {
     let Some(api_key) = api_key() else {
@@ -54,6 +59,14 @@ pub async fn publish_meeting(
     if transcript.is_empty() {
         return Ok(());
     }
+    let raw_transcript = raw_segments.map(|segments| {
+        segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
 
     let response = HTTP_CLIENT
         .post(url)
@@ -63,6 +76,8 @@ pub async fn publish_meeting(
             title,
             transcript,
             transcript_segments: segments,
+            raw_transcript,
+            raw_transcript_segments: raw_segments,
             summary,
         })
         .send()
@@ -85,7 +100,7 @@ pub async fn api_publish_live_transcript(
         .map(serde_json::from_value)
         .collect::<Result<Vec<TranscriptSegment>, _>>()
         .map_err(|error| format!("Invalid live transcript segment: {error}"))?;
-    publish_meeting(&external_id, &title, &segments, None)
+    publish_meeting(&external_id, &title, &segments, None, None)
         .await
         .map_err(|error| error.to_string())
 }
@@ -100,10 +115,23 @@ pub async fn publish_saved_meeting(
         .ok_or_else(|| anyhow!("Meeting not found"))?;
     let segments = meeting
         .transcripts
+        .iter()
+        .map(|segment| TranscriptSegment {
+            id: segment.id.clone(),
+            text: segment.text.clone(),
+            timestamp: segment.timestamp.clone(),
+            speaker: segment.speaker.clone(),
+            audio_start_time: segment.audio_start_time,
+            audio_end_time: segment.audio_end_time,
+            duration: segment.duration,
+        })
+        .collect::<Vec<_>>();
+    let raw_segments = meeting
+        .transcripts
         .into_iter()
         .map(|segment| TranscriptSegment {
             id: segment.id,
-            text: segment.text,
+            text: segment.raw_text,
             timestamp: segment.timestamp,
             speaker: segment.speaker,
             audio_start_time: segment.audio_start_time,
@@ -111,7 +139,7 @@ pub async fn publish_saved_meeting(
             duration: segment.duration,
         })
         .collect::<Vec<_>>();
-    publish_meeting(&meeting.id, &meeting.title, &segments, summary).await
+    publish_meeting(&meeting.id, &meeting.title, &segments, Some(&raw_segments), summary).await
 }
 
 fn api_key() -> Option<String> {
@@ -169,11 +197,14 @@ mod tests {
             title: "Test",
             transcript: "Здравейте".to_string(),
             transcript_segments: &segments,
+            raw_transcript: Some("здравейте".to_string()),
+            raw_transcript_segments: Some(&segments),
             summary: Some("Резюме"),
         })
         .unwrap();
 
         assert_eq!(payload["transcriptSegments"][0]["speaker"], "Microphone");
         assert_eq!(payload["summary"], "Резюме");
+        assert_eq!(payload["rawTranscript"], "здравейте");
     }
 }

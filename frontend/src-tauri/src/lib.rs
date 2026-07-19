@@ -52,6 +52,7 @@ pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
+pub mod transcript_enhancement;
 pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
@@ -651,6 +652,7 @@ pub fn run() {
             api::api_save_meeting_title,
             api::api_save_transcript,
             connections::api_publish_live_transcript,
+            transcript_enhancement::api_enhance_transcript,
             api::open_meeting_folder,
             api::test_backend_connection,
             api::debug_backend_connection,

@@ -62,7 +62,7 @@ impl MeetingsRepository {
 
         // Get meeting details
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error FROM meetings WHERE id = ?")
                 .bind(meeting_id)
                 .fetch_optional(&mut *transaction)
                 .await?;
@@ -87,7 +87,8 @@ impl MeetingsRepository {
                 .into_iter()
                 .map(|t| MeetingTranscript {
                     id: t.id,
-                    text: t.transcript,
+                    text: t.enhanced_transcript.clone().unwrap_or_else(|| t.transcript.clone()),
+                    raw_text: t.transcript,
                     timestamp: t.timestamp,
                     speaker: t.speaker,
                     audio_start_time: t.audio_start_time,
@@ -121,7 +122,7 @@ impl MeetingsRepository {
         }
 
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error FROM meetings WHERE id = ?")
                 .bind(meeting_id)
                 .fetch_optional(pool)
                 .await?;

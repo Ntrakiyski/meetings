@@ -32,6 +32,8 @@ export default function PageContent({
   totalCount,
   loadedCount,
   onLoadMore,
+  enhancementStatus,
+  enhancementError,
 }: {
   meeting: any;
   summaryData: Summary | null;
@@ -46,6 +48,8 @@ export default function PageContent({
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+  enhancementStatus?: 'idle' | 'processing' | 'completed' | 'failed';
+  enhancementError?: string;
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
@@ -144,7 +148,12 @@ export default function PageContent({
     let cancelled = false;
 
     const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
+      if (
+        shouldAutoGenerate &&
+        enhancementStatus !== 'processing' &&
+        meetingData.transcripts.length > 0 &&
+        !cancelled
+      ) {
         console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
         await summaryGeneration.handleGenerateSummary('');
 
@@ -161,7 +170,7 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [shouldAutoGenerate, meeting.id]); // Re-run if meeting changes
+  }, [shouldAutoGenerate, meeting.id, enhancementStatus]); // Re-run after transcript enhancement
 
   return (
     <motion.div
@@ -191,6 +200,8 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={meeting.folder_path}
           onRefetchTranscripts={onRefetchTranscripts}
+          enhancementStatus={enhancementStatus}
+          enhancementError={enhancementError}
         />
         <SummaryPanel
           meeting={meeting}

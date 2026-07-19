@@ -75,3 +75,49 @@ The frontend now starts a live publishing session with the same ID later used by
 No InsForge Realtime dependency was added because it does not improve writes. It remains an optional subscriber mechanism if another screen later needs to watch the row change.
 
 Verification passed: the app-only TypeScript check, Rust `cargo check`, focused publisher test, and full signed Next/Tauri release build. A production two-stage synthetic upload created one row on the first segment and updated that same row to two ordered segments; the row count remained one and the synthetic row was removed. The final `.app` passes strict code-signature verification.
+
+---
+
+# Task Plan
+
+## Goal
+
+Automatically enhance the completed transcript when a meeting stops, preserve the exact original, show the enhanced version by default with a raw-transcript control, and establish truthful speaker behavior for laptop meetings and headphones.
+
+## Constraints
+
+- Never overwrite or discard the locally captured transcript.
+- Allow the LLM to change text only; segment identity, order, timestamps, and speaker source must remain deterministic.
+- Reuse the user's configured summary LLM provider and credentials.
+- A missing model/key or enhancement failure must not block saving or opening the meeting.
+- Continue to distinguish microphone from system audio without inventing remote speaker identities.
+- Preserve unrelated `pnpm-lock.yaml`, `.codex`, and `script` changes.
+
+## Steps
+
+- [x] Trace the active LLM, persistence, meeting-details, and final audio paths.
+- [x] Add durable raw/enhanced transcript state and a validated automatic enhancement command.
+- [x] Trigger enhancement after stop and republish raw plus enhanced transcript data to Connections.
+- [x] Add a corrected/raw transcript control with processing and failure states.
+- [x] Assess and implement the smallest honest speaker improvement supported by the captured audio.
+- [x] Apply and verify the compatible InsForge schema/function changes.
+- [x] Run focused tests, type checks, release build, signature checks, and an end-to-end data round trip.
+
+## Verification
+
+- [x] Original transcript remains byte-for-byte available after successful enhancement.
+- [x] Enhanced transcript is default and only segment text differs.
+- [x] Failed or unavailable enhancement falls back to raw without losing the meeting.
+- [x] Connections stores both raw and enhanced JSON under one stable meeting row.
+- [x] Microphone/headphone/system-audio behavior is verified and described accurately.
+- [x] Final signed application artifact is rebuilt and checked.
+
+## Review
+
+Meetily now starts a best-effort enhancement job immediately after the authoritative local save at meeting stop. It reuses the configured summary provider/model, processes bounded batches, accepts only the same ordered segment IDs, and persists corrected text in a separate column. Raw text, timestamps, speakers, and segment identity are never overwritten. Meeting details poll while correction runs, show corrected text by default when complete, and provide an Original/Corrected control; the Original view bypasses display cleanup and renders the stored ASR text exactly. Automatic summaries wait for enhancement to finish so they use corrected text when available.
+
+Connections production now stores `raw_transcript` and `raw_transcript_segments` beside the corrected/default fields under the same external meeting ID. The schema and edge function were tested on an InsForge branch, merged with zero conflicts, deployed to production, and verified with an authenticated two-version upsert. The test proved later transcript-only updates do not erase the raw copy; all synthetic rows were deleted. A missing PostgREST cache refresh found during production verification was corrected and confirmed in logs.
+
+The active capture pipeline can reliably distinguish the selected microphone from macOS system audio, including when meeting playback uses headphones. The UI now renders these as `You` and `Meeting audio`. It still does not claim Speaker 1/2/3 within remote meeting audio: true remote-person separation needs an active diarization model and clustering pass, which this Community pipeline does not currently provide.
+
+Verification passed: app-only TypeScript checking through the production Next build, Rust `cargo check`, focused enhancement and Connections publisher tests, all 437 Connections tests, strict app code-signature verification, valid DMG checksum, and production InsForge round trips. The `.app` and DMG were rebuilt successfully. The optional Tauri updater archive could not be cryptographically signed because `TAURI_SIGNING_PRIVATE_KEY` is not present; this does not invalidate the verified ad-hoc-signed app bundle or DMG.

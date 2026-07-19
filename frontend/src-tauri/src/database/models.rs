@@ -9,6 +9,8 @@ pub struct MeetingModel {
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub folder_path: Option<String>,
+    pub transcript_enhancement_status: String,
+    pub transcript_enhancement_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
@@ -27,6 +29,7 @@ pub struct Transcript {
     pub id: String,
     pub meeting_id: String,
     pub transcript: String,
+    pub enhanced_transcript: Option<String>,
     pub timestamp: String,
     pub speaker: Option<String>,
     pub summary: Option<String>,

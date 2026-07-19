@@ -8,6 +8,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
+import { invoke } from '@tauri-apps/api/core';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -295,6 +296,18 @@ export function useRecordingStop(
           console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
+
+          try {
+            await invoke('api_enhance_transcript', { meetingId });
+            console.log('✨ Automatic transcript enhancement started');
+          } catch (enhancementError) {
+            console.warn('Could not start automatic transcript enhancement:', enhancementError);
+            toast.warning('Transcript saved without AI correction', {
+              description: enhancementError instanceof Error
+                ? enhancementError.message
+                : String(enhancementError),
+            });
+          }
 
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();

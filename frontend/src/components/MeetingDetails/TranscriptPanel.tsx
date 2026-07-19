@@ -4,7 +4,7 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -28,6 +28,8 @@ interface TranscriptPanelProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+  enhancementStatus?: 'idle' | 'processing' | 'completed' | 'failed';
+  enhancementError?: string;
 }
 
 export function TranscriptPanel({
@@ -48,21 +50,29 @@ export function TranscriptPanel({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  enhancementStatus = 'idle',
+  enhancementError,
 }: TranscriptPanelProps) {
+  const [showOriginal, setShowOriginal] = useState(false);
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
-      return segments;
+      return segments.map(segment => ({
+        ...segment,
+        text: showOriginal ? (segment.rawText ?? segment.text) : segment.text,
+      }));
     }
     // Convert transcripts to segments for virtualization
     return transcripts.map(t => ({
       id: t.id,
       timestamp: t.audio_start_time ?? 0,
       endTime: t.audio_end_time,
-      text: t.text,
       confidence: t.confidence,
+      speaker: t.speaker,
+      rawText: t.raw_text,
+      text: showOriginal ? (t.raw_text ?? t.text) : t.text,
     }));
-  }, [transcripts, usePagination, segments]);
+  }, [transcripts, usePagination, segments, showOriginal]);
 
   return (
     <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-gray-200 bg-white flex-col relative shrink-0">
@@ -75,6 +85,10 @@ export function TranscriptPanel({
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts}
+          enhancementStatus={enhancementStatus}
+          enhancementError={enhancementError}
+          showOriginal={showOriginal}
+          onToggleOriginal={() => setShowOriginal(value => !value)}
         />
       </div>
 
@@ -94,6 +108,7 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          preserveText={showOriginal}
         />
       </div>
 

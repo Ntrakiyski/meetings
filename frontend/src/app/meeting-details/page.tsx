@@ -149,6 +149,16 @@ function MeetingDetailsContent() {
     }
   }, [transcriptError]);
 
+  // Refresh while the best-effort post-meeting enhancement is running. Once it
+  // completes, the paginated API returns corrected text by default and retains raw_text.
+  useEffect(() => {
+    if (metadata?.transcript_enhancement_status !== 'processing') return;
+    const timer = window.setTimeout(() => {
+      void refetch();
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [metadata?.transcript_enhancement_status, refetch]);
+
   // Extract fetchMeetingDetails for use in child components (now refetches via hook)
   const fetchMeetingDetails = useCallback(async () => {
     if (!meetingId || meetingId === 'intro-call') {
@@ -377,6 +387,8 @@ function MeetingDetailsContent() {
     totalCount={totalCount}
     loadedCount={loadedCount}
     onLoadMore={loadMore}
+    enhancementStatus={metadata?.transcript_enhancement_status}
+    enhancementError={metadata?.transcript_enhancement_error}
   />;
 }
 

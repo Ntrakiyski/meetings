@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FilePenLine, FileText, FolderOpen, LoaderCircle, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -16,6 +16,10 @@ interface TranscriptButtonGroupProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+  enhancementStatus?: 'idle' | 'processing' | 'completed' | 'failed';
+  enhancementError?: string;
+  showOriginal?: boolean;
+  onToggleOriginal?: () => void;
 }
 
 
@@ -26,6 +30,10 @@ export function TranscriptButtonGroup({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  enhancementStatus = 'idle',
+  enhancementError,
+  showOriginal = false,
+  onToggleOriginal,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
@@ -52,6 +60,33 @@ export function TranscriptButtonGroup({
         >
           <Copy />
           <span className="hidden lg:inline">Copy</span>
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onToggleOriginal}
+          disabled={enhancementStatus !== 'completed'}
+          title={enhancementStatus === 'processing'
+            ? 'AI correction is in progress'
+            : enhancementStatus === 'failed'
+              ? `AI correction failed: ${enhancementError || 'Unknown error'}`
+              : enhancementStatus === 'completed'
+                ? (showOriginal ? 'Show corrected transcript' : 'Show original transcript')
+                : 'No corrected transcript is available'}
+        >
+          {enhancementStatus === 'processing' ? (
+            <LoaderCircle className="animate-spin" size={18} />
+          ) : showOriginal ? (
+            <FilePenLine size={18} />
+          ) : (
+            <FileText size={18} />
+          )}
+          <span className="hidden xl:inline">
+            {enhancementStatus === 'processing'
+              ? 'Enhancing'
+              : showOriginal ? 'Corrected' : 'Original'}
+          </span>
         </Button>
 
         <Button

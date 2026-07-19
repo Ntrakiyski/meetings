@@ -7,6 +7,7 @@ export interface Message {
 export interface Transcript {
   id: string;
   text: string;
+  raw_text?: string;
   timestamp: string; // Wall-clock time (e.g., "14:30:05")
   sequence_id?: number;
   chunk_start_time?: number; // Legacy field
@@ -93,6 +94,8 @@ export interface MeetingMetadata {
   created_at: string;
   updated_at: string;
   folder_path?: string;
+  transcript_enhancement_status: 'idle' | 'processing' | 'completed' | 'failed';
+  transcript_enhancement_error?: string;
 }
 
 export interface PaginatedTranscriptsResponse {
@@ -107,6 +110,7 @@ export interface TranscriptSegmentData {
   timestamp: number; // audio_start_time in seconds
   endTime?: number; // audio_end_time in seconds
   text: string;
+  rawText?: string;
   confidence?: number;
   speaker?: string;
 }
