@@ -25,6 +25,9 @@ import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcess
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+import { AuthProvider } from '@/contexts/AuthContext'
+import { AuthGate } from '@/components/AuthGate'
+import { AuthToolbar } from '@/components/AuthToolbar'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -233,8 +236,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${sourceSans3.variable} font-sans antialiased`}>
-        <AnalyticsProvider>
-          <RecordingStateProvider>
+        <AuthProvider>
+          <AuthGate>
+            <AnalyticsProvider>
+              <RecordingStateProvider>
+                <AuthToolbar />
             <TranscriptProvider>
               <ConfigProvider>
                 <OllamaDownloadProvider>
@@ -273,8 +279,10 @@ export default function RootLayout({
                 </OllamaDownloadProvider>
               </ConfigProvider>
             </TranscriptProvider>
-          </RecordingStateProvider>
-        </AnalyticsProvider>
+              </RecordingStateProvider>
+            </AnalyticsProvider>
+          </AuthGate>
+        </AuthProvider>
 
         <Toaster position="bottom-center" richColors closeButton />
       </body>

@@ -25,16 +25,22 @@ impl TranscriptsRepository {
         let mut transaction = conn.begin().await?;
 
         let now = Utc::now();
+        let clerk_org_id = crate::auth::require_clerk_org_id()
+            .map_err(|error| SqlxError::Protocol(error.to_string()))?;
+        let created_by = crate::auth::require_user_id()
+            .map_err(|error| SqlxError::Protocol(error.to_string()))?;
 
         // 1. Create the new meeting
         let result = sqlx::query(
-            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, clerk_org_id, created_by, sync_state) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_final')",
         )
         .bind(&meeting_id)
         .bind(meeting_title)
         .bind(now)
         .bind(now)
         .bind(&folder_path)
+        .bind(&clerk_org_id)
+        .bind(&created_by)
         .execute(&mut *transaction)
         .await;
 
@@ -97,13 +103,16 @@ impl TranscriptsRepository {
         }
 
         let search_query = format!("%{}%", query.to_lowercase());
+        let clerk_org_id = crate::auth::require_clerk_org_id()
+            .map_err(|error| SqlxError::Protocol(error.to_string()))?;
 
         let rows = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT m.id, m.title, t.transcript, t.timestamp
              FROM meetings m
              JOIN transcripts t ON m.id = t.meeting_id
-             WHERE LOWER(t.transcript) LIKE ?",
+             WHERE m.clerk_org_id = ? AND LOWER(t.transcript) LIKE ?",
         )
+        .bind(&clerk_org_id)
         .bind(&search_query)
         .fetch_all(pool)
         .await?;

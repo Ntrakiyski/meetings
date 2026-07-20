@@ -11,6 +11,10 @@ pub struct MeetingModel {
     pub folder_path: Option<String>,
     pub transcript_enhancement_status: String,
     pub transcript_enhancement_error: Option<String>,
+    pub clerk_org_id: String,
+    pub created_by: String,
+    pub sync_state: String,
+    pub sync_revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
@@ -105,9 +109,9 @@ pub struct Setting {
 impl Setting {
     /// Parse the custom OpenAI config from JSON string
     pub fn get_custom_openai_config(&self) -> Option<crate::summary::CustomOpenAIConfig> {
-        self.custom_openai_config.as_ref().and_then(|json| {
-            serde_json::from_str(json).ok()
-        })
+        self.custom_openai_config
+            .as_ref()
+            .and_then(|json| serde_json::from_str(json).ok())
     }
 }
 

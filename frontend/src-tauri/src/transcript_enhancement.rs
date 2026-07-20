@@ -43,10 +43,12 @@ pub async fn api_enhance_transcript<R: Runtime>(
     }
 
     let pool = state.db_manager.pool().clone();
+    let clerk_org_id = crate::auth::require_clerk_org_id().map_err(|error| error.to_string())?;
     let status: Option<String> = sqlx::query_scalar(
-        "SELECT transcript_enhancement_status FROM meetings WHERE id = ?",
+        "SELECT transcript_enhancement_status FROM meetings WHERE id = ? AND clerk_org_id = ?",
     )
     .bind(&meeting_id)
+    .bind(&clerk_org_id)
     .fetch_optional(&pool)
     .await
     .map_err(|error| error.to_string())?;
@@ -58,21 +60,27 @@ pub async fn api_enhance_transcript<R: Runtime>(
     }
 
     sqlx::query(
-        "UPDATE meetings SET transcript_enhancement_status = 'processing', transcript_enhancement_error = NULL WHERE id = ?",
+        "UPDATE meetings SET transcript_enhancement_status = 'processing', transcript_enhancement_error = NULL WHERE id = ? AND clerk_org_id = ?",
     )
     .bind(&meeting_id)
+    .bind(&clerk_org_id)
     .execute(&pool)
     .await
     .map_err(|error| error.to_string())?;
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = enhance_meeting(&app, &pool, &meeting_id).await {
-            log::warn!("Transcript enhancement failed for {}: {:#}", meeting_id, error);
+        if let Err(error) = enhance_meeting(&app, &pool, &meeting_id, &clerk_org_id).await {
+            log::warn!(
+                "Transcript enhancement failed for {}: {:#}",
+                meeting_id,
+                error
+            );
             let _ = sqlx::query(
-                "UPDATE meetings SET transcript_enhancement_status = 'failed', transcript_enhancement_error = ? WHERE id = ?",
+                "UPDATE meetings SET transcript_enhancement_status = 'failed', transcript_enhancement_error = ? WHERE id = ? AND clerk_org_id = ?",
             )
             .bind(error.to_string())
             .bind(&meeting_id)
+            .bind(&clerk_org_id)
             .execute(&pool)
             .await;
         }
@@ -85,11 +93,13 @@ async fn enhance_meeting<R: Runtime>(
     app: &AppHandle<R>,
     pool: &SqlitePool,
     meeting_id: &str,
+    clerk_org_id: &str,
 ) -> Result<()> {
     let raw_segments = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, transcript FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC, rowid ASC",
+        "SELECT t.id, t.transcript FROM transcripts t JOIN meetings m ON m.id = t.meeting_id WHERE t.meeting_id = ? AND m.clerk_org_id = ? ORDER BY t.audio_start_time ASC, t.rowid ASC",
     )
     .bind(meeting_id)
+    .bind(clerk_org_id)
     .fetch_all(pool)
     .await?;
 
@@ -132,7 +142,9 @@ async fn enhance_meeting<R: Runtime>(
     let mut connection = pool.acquire().await?;
     let mut transaction = connection.begin().await?;
     for item in &enhanced {
-        sqlx::query("UPDATE transcripts SET enhanced_transcript = ? WHERE id = ? AND meeting_id = ?")
+        sqlx::query(
+            "UPDATE transcripts SET enhanced_transcript = ? WHERE id = ? AND meeting_id = ?",
+        )
             .bind(&item.text)
             .bind(&item.id)
             .bind(meeting_id)
@@ -140,16 +152,20 @@ async fn enhance_meeting<R: Runtime>(
             .await?;
     }
     sqlx::query(
-        "UPDATE meetings SET transcript_enhancement_status = 'completed', transcript_enhancement_error = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE meetings SET transcript_enhancement_status = 'completed', transcript_enhancement_error = NULL, updated_at = ? WHERE id = ? AND clerk_org_id = ?",
     )
     .bind(chrono::Utc::now())
     .bind(meeting_id)
+    .bind(clerk_org_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
 
     if let Err(error) = crate::connections::publish_saved_meeting(pool, meeting_id, None).await {
-        log::warn!("Failed to publish enhanced transcript to Connections: {}", error);
+        log::warn!(
+            "Failed to publish enhanced transcript to Connections: {}",
+            error
+        );
     }
     Ok(())
 }
@@ -160,9 +176,13 @@ async fn load_model_config<R: Runtime>(
 ) -> Result<ModelRequestConfig> {
     let setting = SettingsRepository::get_model_config(pool)
         .await?
-        .ok_or_else(|| anyhow!("Configure an AI summary model before automatic transcript enhancement"))?;
+        .ok_or_else(|| {
+            anyhow!("Configure an AI summary model before automatic transcript enhancement")
+        })?;
     if setting.model.trim().is_empty() {
-        return Err(anyhow!("Configure an AI summary model before automatic transcript enhancement"));
+        return Err(anyhow!(
+            "Configure an AI summary model before automatic transcript enhancement"
+        ));
     }
     let provider = LLMProvider::from_str(&setting.provider).map_err(|error| anyhow!(error))?;
     let mut api_key = String::new();
@@ -224,8 +244,12 @@ fn parse_and_validate_response(
     input: &[EnhancementItem],
     response: &str,
 ) -> Result<Vec<EnhancementItem>> {
-    let start = response.find('[').context("LLM response did not contain a JSON array")?;
-    let end = response.rfind(']').context("LLM response did not contain a complete JSON array")?;
+    let start = response
+        .find('[')
+        .context("LLM response did not contain a JSON array")?;
+    let end = response
+        .rfind(']')
+        .context("LLM response did not contain a complete JSON array")?;
     let output: Vec<EnhancementItem> = serde_json::from_str(&response[start..=end])?;
     if output.len() != input.len() {
         return Err(anyhow!("LLM changed the transcript segment count"));
@@ -247,7 +271,10 @@ mod tests {
 
     #[test]
     fn validates_ids_and_extracts_fenced_json() {
-        let input = vec![EnhancementItem { id: "a".into(), text: "здравейте".into() }];
+        let input = vec![EnhancementItem {
+            id: "a".into(),
+            text: "здравейте".into(),
+        }];
         let parsed = parse_and_validate_response(
             &input,
             "```json\n[{\"id\":\"a\",\"text\":\"Здравейте!\"}]\n```",
@@ -258,11 +285,12 @@ mod tests {
 
     #[test]
     fn rejects_changed_segment_identity() {
-        let input = vec![EnhancementItem { id: "a".into(), text: "text".into() }];
-        assert!(parse_and_validate_response(
-            &input,
-            "[{\"id\":\"b\",\"text\":\"text\"}]",
-        )
-        .is_err());
+        let input = vec![EnhancementItem {
+            id: "a".into(),
+            text: "text".into(),
+        }];
+        assert!(
+            parse_and_validate_response(&input, "[{\"id\":\"b\",\"text\":\"text\"}]",).is_err()
+        );
     }
 }

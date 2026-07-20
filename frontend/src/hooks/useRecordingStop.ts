@@ -13,6 +13,7 @@ import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
+import { recordingStopDisposition, retryRecordingStop } from './recordingRecovery.mjs';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
@@ -73,6 +74,7 @@ export function useRecordingStop(
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
   const stopInProgressRef = useRef(false);
+  const handleRecordingStopRef = useRef<((callApi: boolean) => Promise<void>) | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -136,6 +138,7 @@ export function useRecordingStop(
     setIsRecording(false);
     setIsRecordingDisabled(true);
     const stopStartTime = Date.now();
+    let releaseRecordingScope = false;
 
     try {
       console.log('Post-stop processing (new implementation)...', {
@@ -235,7 +238,8 @@ export function useRecordingStop(
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
       // This ensures user sees all transcripts streaming in before database save
-      if (isCallApi && transcriptionComplete == true) {
+      const stopDisposition = recordingStopDisposition(isCallApi, transcriptionComplete);
+      if (stopDisposition === 'save') {
 
         setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
 
@@ -262,12 +266,12 @@ export function useRecordingStop(
             folderPath,
             currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id')
           );
-
           const meetingId = responseData.meeting_id;
           if (!meetingId) {
             console.error('No meeting_id in response:', responseData);
             throw new Error('No meeting ID received from save operation');
           }
+          releaseRecordingScope = true;
 
           let shouldDetectSummaryLanguage = false;
           try {
@@ -414,14 +418,15 @@ export function useRecordingStop(
         } catch (saveError) {
           console.error('Failed to save meeting to database:', saveError);
           setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : 'Unknown error');
-          toast.error('Failed to save meeting', {
-            description: saveError instanceof Error ? saveError.message : 'Unknown error'
-          });
           throw saveError;
         }
-      } else {
-        // No save needed, go back to IDLE
+      } else if (stopDisposition === 'discard') {
+        // The caller explicitly discarded this recording, so releasing its identity is safe.
+        releaseRecordingScope = true;
         setStatus(RecordingStatus.IDLE);
+      } else {
+        // Keep the operation identity and IndexedDB recovery data intact.
+        throw new Error('Transcription did not finish safely. Retry saving this recording.')
       }
 
       setIsMeetingActive(false);
@@ -430,9 +435,26 @@ export function useRecordingStop(
     } catch (error) {
       console.error('Error in handleRecordingStop:', error);
       setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Unknown error');
+      toast.error('Recording needs to be saved', {
+        description: error instanceof Error ? error.message : 'Unknown error',
+        duration: Infinity,
+        action: {
+          label: 'Retry save',
+          onClick: () => {
+            if (handleRecordingStopRef.current) {
+              void retryRecordingStop(handleRecordingStopRef.current);
+            }
+          },
+        },
+      });
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
+      if (releaseRecordingScope) {
+        await invoke('auth_finish_recording_scope').catch(error => {
+          console.warn('Failed to release recording organization lock:', error)
+        })
+      }
       // Always reset the guard flag when done
       stopInProgressRef.current = false;
     }
@@ -454,22 +476,9 @@ export function useRecordingStop(
     router,
   ]);
 
-  // Expose handleRecordingStop function to window for Rust callbacks
-  const handleRecordingStopRef = useRef(handleRecordingStop);
   useEffect(() => {
     handleRecordingStopRef.current = handleRecordingStop;
   });
-
-  useEffect(() => {
-    (window as any).handleRecordingStop = (callApi: boolean = true) => {
-      handleRecordingStopRef.current(callApi);
-    };
-
-    // Cleanup on unmount
-    return () => {
-      delete (window as any).handleRecordingStop;
-    };
-  }, []);
 
   // Derive summaryStatus from RecordingStatus for backward compatibility
   const summaryStatus: SummaryStatus = status === RecordingStatus.PROCESSING_TRANSCRIPTS ? 'processing' : 'idle';

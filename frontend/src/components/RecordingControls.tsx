@@ -13,6 +13,11 @@ import Analytics from '@/lib/analytics';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { writePinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
+import {
+  runNativeStopBeforeProcessing,
+  stopRecordingAfterTranscriptionError,
+} from '@/hooks/recordingRecovery.mjs';
+import { toast } from 'sonner';
 
 const RECORDING_LANGUAGE_OPTIONS = [
   { code: 'bg', label: 'Bulgarian' },
@@ -71,6 +76,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [transcriptionErrors, setTranscriptionErrors] = useState(0);
   const [isValidatingModel, setIsValidatingModel] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
+  const stopRecordingActionRef = useRef<(() => Promise<void>) | null>(null);
   const [deviceError, setDeviceError] = useState<{ title: string, message: string } | null>(null);
   const [recordingLanguages, setRecordingLanguages] = useState<RecordingLanguage[]>(() => {
     if (typeof window !== 'undefined') {
@@ -213,18 +219,18 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
       console.log('Saving recording to:', savePath);
       console.log('About to call stop_recording command');
-      const result = await invoke('stop_recording', {
-        args: {
-          save_path: savePath
-        }
-      });
+      const result = await runNativeStopBeforeProcessing(
+        () => invoke('stop_recording', {
+          args: { save_path: savePath }
+        }),
+        async saveRequested => {
+          setRecordingPath(savePath);
+          setIsProcessing(false);
+          Analytics.trackTranscriptionSuccess();
+          onRecordingStop(saveRequested);
+        },
+      );
       console.log('stop_recording command completed successfully:', result);
-      setRecordingPath(savePath);
-      // setShowPlayback(true);
-      setIsProcessing(false);
-      // Track successful transcription
-      Analytics.trackTranscriptionSuccess();
-      onRecordingStop(true);
     } catch (error) {
       console.error('Failed to stop recording:', error);
       if (error instanceof Error) {
@@ -233,22 +239,24 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           name: error.name,
           stack: error.stack,
         });
-        if (error.message.includes('No recording in progress')) {
-          return;
-        }
-      } else if (typeof error === 'string' && error.includes('No recording in progress')) {
-        return;
-      } else if (error && typeof error === 'object' && 'toString' in error) {
-        if (error.toString().includes('No recording in progress')) {
-          return;
-        }
       }
       setIsProcessing(false);
-      onRecordingStop(false);
+      toast.error('Could not stop recording', {
+        description: 'The recording is still active. Retry the native stop before saving.',
+        duration: Infinity,
+        action: {
+          label: 'Retry stop',
+          onClick: () => { void stopRecordingActionRef.current?.(); },
+        },
+      });
     } finally {
       setIsStopping(false);
     }
   }, [onRecordingStop]);
+
+  useEffect(() => {
+    stopRecordingActionRef.current = stopRecordingAction;
+  }, [stopRecordingAction]);
 
   const handleStopRecording = useCallback(async () => {
     console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping);
@@ -330,9 +338,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             console.log('Transcription error count incremented:', newCount);
             return newCount;
           });
-          setIsProcessing(false);
-          console.log('Calling onRecordingStop(false) due to transcript error');
-          onRecordingStop(false);
+          console.log('Stopping native recording before recoverable processing due to transcript error');
+          void stopRecordingAfterTranscriptionError(
+            () => invoke<boolean>('is_recording'),
+            () => stopRecordingActionRef.current?.(),
+            error => console.error('Failed to check native recording state after transcript error:', error),
+          );
           if (onTranscriptionError) {
             onTranscriptionError(errorMessage);
           }
@@ -362,9 +373,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             console.log('Transcription error count incremented:', newCount);
             return newCount;
           });
-          setIsProcessing(false);
-          console.log('Calling onRecordingStop(false) due to transcription error');
-          onRecordingStop(false);
+          console.log('Stopping native recording before recoverable processing due to transcription error');
+          void stopRecordingAfterTranscriptionError(
+            () => invoke<boolean>('is_recording'),
+            () => stopRecordingActionRef.current?.(),
+            error => console.error('Failed to check native recording state after transcription error:', error),
+          );
 
           // For actionable errors (like model loading failures), the main page will handle showing the model selector
           // For regular errors, they are handled by useModalState global listener which shows a toast

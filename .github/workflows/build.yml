@@ -44,6 +44,10 @@ on:
         type: boolean
         default: false
 
+env:
+  MEETINGLY_CLERK_ISSUER: ${{ vars.MEETINGLY_CLERK_ISSUER }}
+  MEETINGLY_CLERK_OAUTH_CLIENT_ID: ${{ vars.MEETINGLY_CLERK_OAUTH_CLIENT_ID }}
+
 jobs:
   build:
     permissions:
@@ -56,6 +60,14 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
           fetch-depth: 0
+
+      - name: Validate Clerk build configuration
+        shell: bash
+        run: |
+          if [[ -z "$MEETINGLY_CLERK_ISSUER" || -z "$MEETINGLY_CLERK_OAUTH_CLIENT_ID" ]]; then
+            echo "::error::MEETINGLY_CLERK_ISSUER and MEETINGLY_CLERK_OAUTH_CLIENT_ID must both be configured as repository variables."
+            exit 1
+          fi
 
       - name: Get version from tauri.conf.json.
         id: get-version

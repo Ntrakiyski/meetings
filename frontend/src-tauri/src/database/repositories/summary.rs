@@ -12,6 +12,7 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         sqlx::query_as::<_, SummaryProcess>("SELECT * FROM summary_processes WHERE meeting_id = ?")
             .bind(meeting_id)
             .fetch_optional(pool)
@@ -25,8 +26,11 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         let mut transaction = pool.begin().await?;
 
-        let meeting_exists: bool = sqlx::query("SELECT 1 FROM meetings WHERE id = ?")
+        let clerk_org_id = current_org()?;
+        let meeting_exists: bool =
+            sqlx::query("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
             .bind(meeting_id)
+                .bind(&clerk_org_id)
             .fetch_optional(&mut *transaction)
             .await?
             .is_some();
@@ -55,9 +59,10 @@ impl SummaryProcessesRepository {
             .execute(&mut *transaction)
             .await?;
 
-        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ? AND clerk_org_id = ?")
             .bind(now)
             .bind(meeting_id)
+            .bind(clerk_org_id)
             .execute(&mut *transaction)
             .await?;
 
@@ -74,6 +79,7 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         sqlx::query_as::<_, SummaryProcess>(
             "SELECT p.* FROM summary_processes p JOIN transcript_chunks t ON p.meeting_id = t.meeting_id WHERE p.meeting_id = ?",
         )
@@ -86,6 +92,7 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<(), sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         log_info!(
             "Creating or resetting summary process for meeting_id: {}",
             meeting_id
@@ -125,6 +132,7 @@ impl SummaryProcessesRepository {
         chunk_count: i64,
         processing_time: f64,
     ) -> Result<(), sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         let now = Utc::now();
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;
@@ -156,6 +164,7 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
         error: &str,
     ) -> Result<(), sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         let now = Utc::now();
 
         // Restore from backup if it exists, otherwise keep current result
@@ -190,6 +199,7 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<(), sqlx::Error> {
+        ensure_current_org_meeting(pool, meeting_id).await?;
         let now = Utc::now();
 
         // Restore from backup if it exists, otherwise keep current result
@@ -218,4 +228,21 @@ impl SummaryProcessesRepository {
         );
         Ok(())
     }
+}
+
+async fn ensure_current_org_meeting(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
+            .bind(meeting_id)
+            .bind(current_org()?)
+            .fetch_optional(pool)
+            .await?;
+    exists.map(|_| ()).ok_or(sqlx::Error::RowNotFound)
+}
+
+fn current_org() -> Result<String, sqlx::Error> {
+    crate::auth::require_clerk_org_id().map_err(|error| sqlx::Error::Protocol(error.to_string()))
 }

@@ -823,7 +823,10 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
     meeting_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<MeetingMetadata, String> {
-    log_info!("api_get_meeting_metadata called for meeting_id: {}", meeting_id);
+    log_info!(
+        "api_get_meeting_metadata called for meeting_id: {}",
+        meeting_id
+    );
 
     let pool = state.db_manager.pool();
 
@@ -869,7 +872,9 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    match MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, limit, offset).await {
+    match MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, limit, offset)
+        .await
+    {
         Ok((transcripts, total_count)) => {
             log_info!(
                 "Successfully retrieved {} transcripts for meeting {} (total: {})",
@@ -883,7 +888,10 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                 .into_iter()
                 .map(|t| MeetingTranscript {
                     id: t.id,
-                    text: t.enhanced_transcript.clone().unwrap_or_else(|| t.transcript.clone()),
+                    text: t
+                        .enhanced_transcript
+                        .clone()
+                        .unwrap_or_else(|| t.transcript.clone()),
                     raw_text: t.transcript,
                     timestamp: t.timestamp,
                     speaker: t.speaker,
@@ -902,7 +910,11 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             })
         }
         Err(e) => {
-            log_error!("Error retrieving transcripts for meeting {}: {}", meeting_id, e);
+            log_error!(
+                "Error retrieving transcripts for meeting {}: {}",
+                meeting_id,
+                e
+            );
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
@@ -971,7 +983,10 @@ pub async fn api_save_transcript<R: Runtime>(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             log_error!("Failed to parse transcript segments: {}", e);
-            format!("Invalid transcript data format: {}. Please check the data structure.", e)
+            format!(
+                "Invalid transcript data format: {}. Please check the data structure.",
+                e
+            )
         })?;
 
     // Log parsed segments count and first segment details
@@ -984,6 +999,24 @@ pub async fn api_save_transcript<R: Runtime>(
     }
 
     let pool = state.db_manager.pool();
+    let operation_identity =
+        crate::auth::require_operation_identity().map_err(|error| error.to_string())?;
+    if let Some(meeting_id) = requeue_existing_final(
+        pool,
+        &operation_identity,
+        meeting_id.as_deref(),
+        &meeting_title,
+        &transcripts_to_save,
+    )
+    .await?
+    {
+        crate::connections::retry_queued_meetings(pool.clone(), operation_identity);
+        return Ok(serde_json::json!({
+            "status": "success",
+            "message": "Transcript sync recovered successfully",
+            "meeting_id": meeting_id
+        }));
+    }
 
     // Now, call the repository with the correctly typed data.
     match TranscriptsRepository::save_transcript(
@@ -1000,22 +1033,21 @@ pub async fn api_save_transcript<R: Runtime>(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
             );
-            let publish_id = meeting_id.clone();
-            let publish_title = meeting_title.clone();
-            let publish_segments = transcripts_to_save.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = crate::connections::publish_meeting(
-                    &publish_id,
-                    &publish_title,
-                    &publish_segments,
-                    Some(&publish_segments),
+            crate::connections::queue_meeting(
+                pool,
+                &operation_identity,
+                &meeting_id,
+                &meeting_title,
+                &transcripts_to_save,
+                Some(&transcripts_to_save),
+                None,
+                "final",
+                None,
                     None,
                 )
                 .await
-                {
-                    log::warn!("Failed to publish meeting to Connections: {}", error);
-                }
-            });
+            .map_err(|error| format!("Failed to queue meeting sync: {error}"))?;
+            crate::connections::retry_queued_meetings(pool.clone(), operation_identity);
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",
@@ -1033,6 +1065,48 @@ pub async fn api_save_transcript<R: Runtime>(
     }
 }
 
+async fn requeue_existing_final(
+    pool: &sqlx::SqlitePool,
+    identity: &crate::auth::OperationIdentity,
+    meeting_id: Option<&str>,
+    meeting_title: &str,
+    transcripts: &[TranscriptSegment],
+) -> Result<Option<String>, String> {
+    let Some(meeting_id) = meeting_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM meetings
+            WHERE id = ? AND clerk_org_id = ? AND created_by = ?
+        )",
+    )
+    .bind(meeting_id)
+    .bind(&identity.clerk_org_id)
+    .bind(&identity.user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("Failed to inspect existing meeting: {error}"))?;
+    if !exists {
+        return Ok(None);
+    }
+    crate::connections::queue_meeting(
+        pool,
+        identity,
+        meeting_id,
+        meeting_title,
+        transcripts,
+        Some(transcripts),
+        None,
+        "final",
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| format!("Failed to queue meeting sync: {error}"))?;
+    Ok(Some(meeting_id.to_string()))
+}
+
 /// Opens the meeting's recording folder in the system file explorer
 #[tauri::command]
 pub async fn open_meeting_folder<R: Runtime>(
@@ -1043,12 +1117,14 @@ pub async fn open_meeting_folder<R: Runtime>(
     log_info!("open_meeting_folder called for meeting_id: {}", meeting_id);
 
     let pool = state.db_manager.pool();
+    let clerk_org_id = crate::auth::require_clerk_org_id().map_err(|error| error.to_string())?;
 
     // Get meeting with folder_path
     let meeting: Option<MeetingModel> = sqlx::query_as(
-        "SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error FROM meetings WHERE id = ?",
+        "SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error, clerk_org_id, created_by, sync_state, sync_revision FROM meetings WHERE id = ? AND clerk_org_id = ?",
     )
     .bind(&meeting_id)
+    .bind(&clerk_org_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Database error: {}", e))?;
@@ -1258,7 +1334,10 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!("✅ Successfully saved custom OpenAI config for endpoint: {}", config.endpoint);
+            log_info!(
+                "✅ Successfully saved custom OpenAI config for endpoint: {}",
+                config.endpoint
+            );
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1284,8 +1363,11 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
             if let Some(ref c) = config {
-                log_info!("✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint, c.model);
+                log_info!(
+                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
+                    c.endpoint,
+                    c.model
+                );
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1386,17 +1468,33 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                         }
 
                         // Response was 200 but doesn't match OpenAI format
-                        log_warn!("⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}", response_text);
+                        log_warn!(
+                            "⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}",
+                            response_text
+                        );
                         Err("Endpoint is reachable but doesn't appear to be OpenAI-compatible. Response is missing 'choices' array or 'message.content' / 'message.reasoning_content' field.".to_string())
                     }
                     Err(e) => {
-                        log_warn!("⚠️ Endpoint returned 200 but response is not valid JSON: {}", e);
-                        Err(format!("Endpoint is reachable but returned invalid JSON: {}. Response: {}", e, response_text))
+                        log_warn!(
+                            "⚠️ Endpoint returned 200 but response is not valid JSON: {}",
+                            e
+                        );
+                        Err(format!(
+                            "Endpoint is reachable but returned invalid JSON: {}. Response: {}",
+                            e, response_text
+                        ))
                     }
                 }
             } else {
-                log_warn!("⚠️ Custom OpenAI connection test failed with status {}: {}", status, response_text);
-                Err(format!("Connection failed with status {}: {}", status, response_text))
+                log_warn!(
+                    "⚠️ Custom OpenAI connection test failed with status {}: {}",
+                    status,
+                    response_text
+                );
+                Err(format!(
+                    "Connection failed with status {}: {}",
+                    status, response_text
+                ))
             }
         }
         Err(e) => {
@@ -1409,5 +1507,71 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn existing_local_final_can_be_requeued_after_queue_failure() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                clerk_org_id TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                sync_state TEXT NOT NULL,
+                sync_revision INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE meeting_sync_queue (
+                clerk_org_id TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (clerk_org_id, created_by, external_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO meetings (id, clerk_org_id, created_by, sync_state) VALUES ('meeting-1', 'org-a', 'user-a', 'pending_final')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let identity = crate::auth::OperationIdentity::new("org-a", "user-a");
+
+        let recovered =
+            requeue_existing_final(&pool, &identity, Some("meeting-1"), "Recovered final", &[])
+                .await
+                .unwrap();
+
+        assert_eq!(recovered.as_deref(), Some("meeting-1"));
+        let queued = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM meeting_sync_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1);
+        let sync_state = sqlx::query_as::<_, (String, i64)>(
+            "SELECT sync_state, sync_revision FROM meetings WHERE id = 'meeting-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sync_state.0, "final");
+        assert!(sync_state.1 > 0);
     }
 }

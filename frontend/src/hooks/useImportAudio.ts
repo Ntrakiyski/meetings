@@ -4,6 +4,7 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import Analytics from '@/lib/analytics';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
+import { retryPendingFinalSync } from '@/contexts/authRecovery.mjs';
 
 export interface AudioFileInfo {
   path: string;
@@ -139,6 +140,26 @@ export function useImportAudio({
           setStatus('error');
           setError(event.payload.error);
           onErrorRef.current?.(event.payload.error);
+          if (event.payload.error.includes('Import saved locally but final sync queueing failed')) {
+            toast.error('Import saved locally but is not synced', {
+              description: 'Your meeting is safe on this device. Retry authenticated sync now.',
+              duration: Infinity,
+              action: {
+                label: 'Retry sync',
+                onClick: () => {
+                  void retryPendingFinalSync(command => invoke(command))
+                    .then(() => {
+                      setError(null);
+                      setStatus('complete');
+                      toast.success('Imported meeting synced');
+                    })
+                    .catch(reason => toast.error('Sync retry failed', {
+                      description: String(reason),
+                    }));
+                },
+              },
+            });
+          }
         }
       );
       if (cleanedUpRef.current) {
