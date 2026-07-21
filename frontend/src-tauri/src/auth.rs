@@ -447,13 +447,26 @@ fn audience_contains(audience: &serde_json::Value, client_id: &str) -> bool {
 }
 
 async fn open_portal(path: &str) -> std::result::Result<(), String> {
-    crate::api::api::open_external_url(format!("{}/{path}", issuer().map_err(display_error)?)).await
+    let url =
+        portal_url(&account_portal_url().map_err(display_error)?, path).map_err(display_error)?;
+    crate::api::api::open_external_url(url).await
+}
+
+fn portal_url(base: &str, path: &str) -> Result<String> {
+    Ok(Url::parse(base)?.join(path)?.to_string())
 }
 
 fn issuer() -> Result<String> {
     config_value(
         "MEETINGLY_CLERK_ISSUER",
         option_env!("MEETINGLY_CLERK_ISSUER"),
+    )
+}
+
+fn account_portal_url() -> Result<String> {
+    config_value(
+        "MEETINGLY_CLERK_ACCOUNT_PORTAL_URL",
+        option_env!("MEETINGLY_CLERK_ACCOUNT_PORTAL_URL"),
     )
 }
 
@@ -591,6 +604,18 @@ mod tests {
         let url = Url::parse("meetingly://oauth/callback?code=x&state=y").unwrap();
         assert_eq!(url.host_str(), Some("oauth"));
         assert_eq!(url.path(), "/callback");
+    }
+
+    #[test]
+    fn builds_account_portal_urls_from_the_portal_host() {
+        assert_eq!(
+            portal_url("https://immense-parrot-83.accounts.dev", "user").unwrap(),
+            "https://immense-parrot-83.accounts.dev/user"
+        );
+        assert_eq!(
+            portal_url("https://immense-parrot-83.accounts.dev/", "organization").unwrap(),
+            "https://immense-parrot-83.accounts.dev/organization"
+        );
     }
 
     #[test]

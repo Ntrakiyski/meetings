@@ -32,6 +32,7 @@ env:
   CARGO_TERM_COLOR: always
   MEETINGLY_CLERK_ISSUER: ${{ vars.MEETINGLY_CLERK_ISSUER }}
   MEETINGLY_CLERK_OAUTH_CLIENT_ID: ${{ vars.MEETINGLY_CLERK_OAUTH_CLIENT_ID }}
+  MEETINGLY_CLERK_ACCOUNT_PORTAL_URL: ${{ vars.MEETINGLY_CLERK_ACCOUNT_PORTAL_URL }}
 
 jobs:
   build-macos:
@@ -49,8 +50,8 @@ jobs:
       - name: Validate Clerk build configuration
         shell: bash
         run: |
-          if [[ -z "$MEETINGLY_CLERK_ISSUER" || -z "$MEETINGLY_CLERK_OAUTH_CLIENT_ID" ]]; then
-            echo "::error::MEETINGLY_CLERK_ISSUER and MEETINGLY_CLERK_OAUTH_CLIENT_ID must both be configured as repository variables."
+          if [[ -z "$MEETINGLY_CLERK_ISSUER" || -z "$MEETINGLY_CLERK_OAUTH_CLIENT_ID" || -z "$MEETINGLY_CLERK_ACCOUNT_PORTAL_URL" ]]; then
+            echo "::error::All MEETINGLY_CLERK_* repository variables must be configured."
             exit 1
           fi
 
