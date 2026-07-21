@@ -100,7 +100,7 @@ struct TokenResponse {
 struct AccessClaims {
     sub: String,
     org_id: String,
-    aud: serde_json::Value,
+    aud: Option<serde_json::Value>,
     exp: i64,
     iss: String,
 }
@@ -396,8 +396,12 @@ async fn validate_access_token(token: &str) -> Result<AuthSession> {
         .nth(1)
         .context("Clerk access token is not a JWT.")?;
     let claims: AccessClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    let client_id = client_id()?;
     if claims.iss.trim_end_matches('/') != issuer()?
-        || !audience_contains(&claims.aud, &client_id()?)
+        || claims
+            .aud
+            .as_ref()
+            .is_some_and(|audience| !audience_contains(audience, &client_id))
     {
         return Err(anyhow!("Clerk access token issuer or audience is invalid."));
     }
@@ -587,6 +591,21 @@ mod tests {
         let url = Url::parse("meetingly://oauth/callback?code=x&state=y").unwrap();
         assert_eq!(url.host_str(), Some("oauth"));
         assert_eq!(url.path(), "/callback");
+    }
+
+    #[test]
+    fn parses_clerk_oauth_access_claims_without_audience() {
+        let claims: AccessClaims = serde_json::from_value(serde_json::json!({
+            "sub": "user-a",
+            "org_id": "org-a",
+            "azp": "meetings-client",
+            "exp": i64::MAX,
+            "iss": "https://clerk.example"
+        }))
+        .unwrap();
+
+        assert_eq!(claims.sub, "user-a");
+        assert_eq!(claims.org_id, "org-a");
     }
 
     #[test]
