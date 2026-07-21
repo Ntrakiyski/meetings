@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
-use tauri::{App, Emitter, Runtime};
+use tauri::{App, AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_deep_link::DeepLinkExt;
 use url::Url;
 
@@ -22,6 +22,20 @@ static RECORDING_IDENTITY: Lazy<RwLock<Option<OperationIdentity>>> =
 #[cfg(test)]
 pub(crate) static AUTH_TEST_MUTEX: Lazy<std::sync::Mutex<()>> =
     Lazy::new(|| std::sync::Mutex::new(()));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthenticationSurface {
+    SystemSession,
+    ExternalBrowser,
+}
+
+fn authentication_surface_for(target_os: &str) -> AuthenticationSurface {
+    if target_os == "macos" {
+        AuthenticationSurface::SystemSession
+    } else {
+        AuthenticationSurface::ExternalBrowser
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationIdentity {
@@ -119,14 +133,8 @@ pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
             let callback = url.clone();
             let app = handle.clone();
             tauri::async_runtime::spawn(async move {
-                match finish_authorization(callback).await {
-                    Ok(session) => {
-                        let _ = app.emit("auth-changed", Some(session));
-                    }
-                    Err(error) => {
-                        log::error!("Clerk OAuth callback failed: {error:#}");
-                        let _ = app.emit("auth-error", error.to_string());
-                    }
+                if let Err(error) = finish_authorization_and_emit(&app, callback).await {
+                    log::error!("Clerk OAuth callback failed: {error}");
                 }
             });
         }
@@ -138,10 +146,10 @@ pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
 }
 
 #[tauri::command]
-pub async fn auth_start_sign_in() -> std::result::Result<(), String> {
+pub async fn auth_start_sign_in(app: AppHandle) -> std::result::Result<(), String> {
     ensure_organization_switching_allowed()?;
     let authorization_url = prepare_authorization_url().await.map_err(display_error)?;
-    crate::api::api::open_external_url(authorization_url.to_string()).await
+    launch_authorization(&app, authorization_url).await
 }
 
 async fn prepare_authorization_url() -> Result<Url> {
@@ -204,14 +212,14 @@ pub async fn auth_sign_out() -> std::result::Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn auth_open_profile() -> std::result::Result<(), String> {
-    open_portal("user").await
+pub async fn auth_open_profile(app: AppHandle) -> std::result::Result<(), String> {
+    open_portal(&app, "user").await
 }
 
 #[tauri::command]
-pub async fn auth_open_organization() -> std::result::Result<(), String> {
+pub async fn auth_open_organization(app: AppHandle) -> std::result::Result<(), String> {
     ensure_organization_switching_allowed()?;
-    open_portal("organization").await
+    open_portal(&app, "organization").await
 }
 
 #[tauri::command]
@@ -450,7 +458,7 @@ fn audience_contains(audience: &serde_json::Value, client_id: &str) -> bool {
             .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(client_id)))
 }
 
-async fn open_portal(path: &str) -> std::result::Result<(), String> {
+async fn open_portal(app: &AppHandle, path: &str) -> std::result::Result<(), String> {
     let return_url = prepare_authorization_url().await.map_err(display_error)?;
     let url = portal_url(
         &account_portal_url().map_err(display_error)?,
@@ -458,12 +466,131 @@ async fn open_portal(path: &str) -> std::result::Result<(), String> {
         return_url.as_str(),
     )
     .map_err(display_error)?;
-    crate::api::api::open_external_url(url).await
+    let url = Url::parse(&url).map_err(display_error)?;
+    launch_authorization(app, url).await
+}
+
+async fn launch_authorization(
+    app: &AppHandle,
+    authorization_url: Url,
+) -> std::result::Result<(), String> {
+    match authentication_surface_for(std::env::consts::OS) {
+        #[cfg(target_os = "macos")]
+        AuthenticationSurface::SystemSession => {
+            let window = app
+                .get_webview_window("main")
+                .ok_or_else(|| "Meetily's main window is unavailable.".to_string())?;
+            let presentation_window = window.ns_window().map_err(display_error)? as usize;
+            let callback = macos_web_auth::authenticate(authorization_url, presentation_window)
+                .await
+                .map_err(display_error)?;
+            finish_authorization_and_emit(app, callback).await
+        }
+        #[cfg(not(target_os = "macos"))]
+        AuthenticationSurface::SystemSession => {
+            Err("The native authentication session is unavailable on this platform.".to_string())
+        }
+        AuthenticationSurface::ExternalBrowser => {
+            let _ = app;
+            crate::api::api::open_external_url(authorization_url.to_string()).await
+        }
+    }
+}
+
+async fn finish_authorization_and_emit<R: Runtime>(
+    app: &AppHandle<R>,
+    callback: Url,
+) -> std::result::Result<(), String> {
+    match finish_authorization(callback).await {
+        Ok(session) => app
+            .emit("auth-changed", Some(session))
+            .map_err(display_error),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = app.emit("auth-error", message.clone());
+            Err(message)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_web_auth {
+    use anyhow::{anyhow, Context, Result};
+    use futures_channel::oneshot;
+    use once_cell::sync::Lazy;
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::sync::Mutex;
+    use url::Url;
+
+    type Completion = oneshot::Sender<Result<Url>>;
+    static COMPLETION: Lazy<Mutex<Option<Completion>>> = Lazy::new(|| Mutex::new(None));
+
+    extern "C" {
+        fn meetingly_start_web_auth_session(
+            url: *const c_char,
+            callback_scheme: *const c_char,
+            presentation_window: *mut c_void,
+            completion: extern "C" fn(*const c_char, *const c_char),
+        ) -> i32;
+    }
+
+    pub async fn authenticate(url: Url, presentation_window: usize) -> Result<Url> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut pending = COMPLETION
+                .lock()
+                .map_err(|_| anyhow!("The macOS authentication session lock is unavailable."))?;
+            if pending.is_some() {
+                return Err(anyhow!("A Clerk authentication session is already open."));
+            }
+            *pending = Some(sender);
+        }
+
+        let url = CString::new(url.as_str())?;
+        let scheme = CString::new("meetingly")?;
+        let started = unsafe {
+            meetingly_start_web_auth_session(
+                url.as_ptr(),
+                scheme.as_ptr(),
+                presentation_window as *mut c_void,
+                complete,
+            )
+        };
+        if started == 0 {
+            if let Ok(mut pending) = COMPLETION.lock() {
+                pending.take();
+            }
+            return Err(anyhow!("macOS rejected the web authentication request."));
+        }
+
+        receiver
+            .await
+            .context("The macOS authentication session ended without a callback.")?
+    }
+
+    extern "C" fn complete(callback_url: *const c_char, error_message: *const c_char) {
+        let result = if !callback_url.is_null() {
+            let callback = unsafe { CStr::from_ptr(callback_url) }.to_string_lossy();
+            Url::parse(&callback).context("macOS returned an invalid OAuth callback URL.")
+        } else if !error_message.is_null() {
+            let message = unsafe { CStr::from_ptr(error_message) }.to_string_lossy();
+            Err(anyhow!(message.into_owned()))
+        } else {
+            Err(anyhow!("The macOS authentication session was cancelled."))
+        };
+
+        if let Ok(mut pending) = COMPLETION.lock() {
+            if let Some(sender) = pending.take() {
+                let _ = sender.send(result);
+            }
+        }
+    }
 }
 
 fn portal_url(base: &str, path: &str, return_url: &str) -> Result<String> {
     let mut url = Url::parse(base)?.join(path)?;
-    url.query_pairs_mut().append_pair("redirect_url", return_url);
+    url.query_pairs_mut()
+        .append_pair("redirect_url", return_url);
     Ok(url.to_string())
 }
 
@@ -604,8 +731,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn macos_authentication_owns_the_callback_session() {
+        assert_eq!(
+            authentication_surface_for("macos"),
+            AuthenticationSurface::SystemSession
+        );
+        assert_eq!(
+            authentication_surface_for("windows"),
+            AuthenticationSurface::ExternalBrowser
+        );
+        assert_eq!(
+            authentication_surface_for("linux"),
+            AuthenticationSurface::ExternalBrowser
+        );
+    }
+
+    #[test]
     fn validates_callback_and_audience_shapes() {
-        let _state = AUTH_TEST_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert!(audience_contains(&serde_json::json!("client"), "client"));
         assert!(audience_contains(
             &serde_json::json!(["other", "client"]),
@@ -619,7 +764,8 @@ mod tests {
 
     #[test]
     fn builds_account_portal_urls_from_the_portal_host() {
-        let return_url = "https://immense-parrot-83.clerk.accounts.dev/oauth/authorize?client_id=client";
+        let return_url =
+            "https://immense-parrot-83.clerk.accounts.dev/oauth/authorize?client_id=client";
         assert_eq!(
             portal_url(
                 "https://immense-parrot-83.accounts.dev",
@@ -657,7 +803,9 @@ mod tests {
 
     #[test]
     fn recording_identity_stays_bound_to_starting_organization() {
-        let _state = AUTH_TEST_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         clear_recording_identity();
         set_current_session(Some(AuthSession {
             user_id: "user-a".to_string(),
@@ -675,16 +823,18 @@ mod tests {
         assert_eq!(require_user_id().unwrap(), "user-a");
         assert_eq!(require_current_clerk_org_id().unwrap(), "org-b");
         assert!(auth_finish_recording_scope().is_err());
-        assert!(finish_recording_identity_if_matches(&OperationIdentity::new(
-            "org-a", "user-a"
-        )));
+        assert!(finish_recording_identity_if_matches(
+            &OperationIdentity::new("org-a", "user-a")
+        ));
         assert_eq!(require_clerk_org_id().unwrap(), "org-b");
         set_current_session(None);
     }
 
     #[test]
     fn recovery_releases_only_the_matching_recording_identity() {
-        let _state = AUTH_TEST_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         clear_recording_identity();
         set_current_session(Some(AuthSession {
             user_id: "user-a".to_string(),

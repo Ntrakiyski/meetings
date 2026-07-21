@@ -7,6 +7,14 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
+        cc::Build::new()
+            .file("native/web_auth_session.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("meetingly_web_auth_session");
+
+        println!("cargo:rerun-if-changed=native/web_auth_session.m");
+        println!("cargo:rustc-link-lib=framework=AuthenticationServices");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=Cocoa");
         println!("cargo:rustc-link-lib=framework=Foundation");
