@@ -140,19 +140,23 @@ pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
 #[tauri::command]
 pub async fn auth_start_sign_in() -> std::result::Result<(), String> {
     ensure_organization_switching_allowed()?;
-    let metadata = metadata().await.map_err(display_error)?;
+    let authorization_url = prepare_authorization_url().await.map_err(display_error)?;
+    crate::api::api::open_external_url(authorization_url.to_string()).await
+}
+
+async fn prepare_authorization_url() -> Result<Url> {
+    let metadata = metadata().await?;
     let verifier = random_urlsafe(32);
     let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(
         &ring::digest::SHA256,
         verifier.as_bytes(),
     ));
     let state = random_urlsafe(24);
-    let mut authorization_url =
-        Url::parse(&metadata.authorization_endpoint).map_err(display_error)?;
+    let mut authorization_url = Url::parse(&metadata.authorization_endpoint)?;
     authorization_url
         .query_pairs_mut()
         .append_pair("response_type", "code")
-        .append_pair("client_id", &client_id().map_err(display_error)?)
+        .append_pair("client_id", &client_id()?)
         .append_pair("redirect_uri", REDIRECT_URI)
         .append_pair("scope", SCOPES)
         .append_pair("state", &state)
@@ -161,9 +165,9 @@ pub async fn auth_start_sign_in() -> std::result::Result<(), String> {
         .append_pair("prompt", "consent");
     *PENDING
         .write()
-        .map_err(|_| "OAuth state lock is unavailable".to_string())? =
+        .map_err(|_| anyhow!("OAuth state lock is unavailable"))? =
         Some(PendingAuthorization { state, verifier });
-    crate::api::api::open_external_url(authorization_url.to_string()).await
+    Ok(authorization_url)
 }
 
 #[tauri::command]
@@ -447,13 +451,20 @@ fn audience_contains(audience: &serde_json::Value, client_id: &str) -> bool {
 }
 
 async fn open_portal(path: &str) -> std::result::Result<(), String> {
-    let url =
-        portal_url(&account_portal_url().map_err(display_error)?, path).map_err(display_error)?;
+    let return_url = prepare_authorization_url().await.map_err(display_error)?;
+    let url = portal_url(
+        &account_portal_url().map_err(display_error)?,
+        path,
+        return_url.as_str(),
+    )
+    .map_err(display_error)?;
     crate::api::api::open_external_url(url).await
 }
 
-fn portal_url(base: &str, path: &str) -> Result<String> {
-    Ok(Url::parse(base)?.join(path)?.to_string())
+fn portal_url(base: &str, path: &str, return_url: &str) -> Result<String> {
+    let mut url = Url::parse(base)?.join(path)?;
+    url.query_pairs_mut().append_pair("redirect_url", return_url);
+    Ok(url.to_string())
 }
 
 fn issuer() -> Result<String> {
@@ -608,13 +619,24 @@ mod tests {
 
     #[test]
     fn builds_account_portal_urls_from_the_portal_host() {
+        let return_url = "https://immense-parrot-83.clerk.accounts.dev/oauth/authorize?client_id=client";
         assert_eq!(
-            portal_url("https://immense-parrot-83.accounts.dev", "user").unwrap(),
-            "https://immense-parrot-83.accounts.dev/user"
+            portal_url(
+                "https://immense-parrot-83.accounts.dev",
+                "user",
+                return_url
+            )
+            .unwrap(),
+            "https://immense-parrot-83.accounts.dev/user?redirect_url=https%3A%2F%2Fimmense-parrot-83.clerk.accounts.dev%2Foauth%2Fauthorize%3Fclient_id%3Dclient"
         );
         assert_eq!(
-            portal_url("https://immense-parrot-83.accounts.dev/", "organization").unwrap(),
-            "https://immense-parrot-83.accounts.dev/organization"
+            portal_url(
+                "https://immense-parrot-83.accounts.dev/",
+                "organization",
+                return_url
+            )
+            .unwrap(),
+            "https://immense-parrot-83.accounts.dev/organization?redirect_url=https%3A%2F%2Fimmense-parrot-83.clerk.accounts.dev%2Foauth%2Fauthorize%3Fclient_id%3Dclient"
         );
     }
 
