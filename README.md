@@ -15,6 +15,12 @@ Meetily is a privacy-first AI meeting assistant that runs entirely on local infr
   <img src="docs/meetily_demo.gif" width="650" alt="Meetily Demo" />
 </p>
 
+## Interactive architecture map
+
+[![Meetings architecture diagram](docs/architecture/architecture.png)](docs/architecture/architecture.html)
+
+The image links to the committed self-contained map. After cloning or downloading the repository, open [`docs/architecture/architecture.html`](docs/architecture/architecture.html) locally to search components, trace relationships, switch themes, and export the diagram.
+
 ## Why local-first
 
 - **Privacy first.** All processing happens on your device — transcription, summarization, storage.
