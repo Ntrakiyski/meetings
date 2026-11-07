@@ -36,14 +36,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_requires_original_mapping_and_preserves_other_recordings_and_conflicts() {
-        let path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("migrations");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let migrator = Migrator::new(path).await.unwrap();
         let previous = Migrator {
             migrations: Cow::Owned(

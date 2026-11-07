@@ -70,14 +70,7 @@ mod tests {
 
     #[tokio::test]
     async fn checked_migrations_preserve_preownership_content_and_repeat_safely() {
-        let path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("migrations");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let migrator = Migrator::new(path).await.unwrap();
         let earlier = Migrator {
             migrations: Cow::Owned(

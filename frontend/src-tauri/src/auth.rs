@@ -133,6 +133,7 @@ pub async fn auth_start_sign_in(app: AppHandle) -> std::result::Result<(), Strin
 }
 
 async fn prepare_authorization_url() -> Result<Url> {
+    let _tokens = TOKEN_LOCK.lock().await;
     let metadata = metadata().await?;
     let verifier = random_urlsafe(32);
     let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(
@@ -155,6 +156,7 @@ async fn prepare_authorization_url() -> Result<Url> {
             "resource",
             &format!("{}/api/meetings", normalized_origin(&connections_url())?),
         );
+    let _recording = idle_recording_scope()?;
     *PENDING
         .write()
         .map_err(|_| anyhow!("OAuth state lock is unavailable"))? = Some(PendingAuthorization {
@@ -179,13 +181,20 @@ pub async fn auth_get_session() -> std::result::Result<Option<AuthSession>, Stri
 
 #[tauri::command]
 pub async fn auth_sign_out() -> std::result::Result<(), String> {
-    ensure_workspace_switching_allowed()?;
     let _tokens = TOKEN_LOCK.lock().await;
-    if let Ok(tokens) = load_tokens() {
+    // Clear local authority before awaiting revocation, while recording startup is excluded.
+    let previous = {
+        let _recording = idle_recording_scope().map_err(display_error)?;
+        let previous = load_tokens().ok();
+        delete_tokens().map_err(display_error)?;
+        clear_pending_authorization().map_err(display_error)?;
+        set_current_session(None);
+        previous
+    };
+    if let Some(tokens) = previous {
         if let Ok(metadata) = metadata().await {
             if let Some(endpoint) = metadata.revocation_endpoint {
                 let _ = HTTP_CLIENT
-                    .clone()
                     .post(endpoint)
                     .form(&[
                         ("token", tokens.refresh_token),
@@ -196,8 +205,6 @@ pub async fn auth_sign_out() -> std::result::Result<(), String> {
             }
         }
     }
-    delete_tokens().map_err(display_error)?;
-    set_current_session(None);
     Ok(())
 }
 
@@ -279,6 +286,13 @@ pub fn begin_recording_identity() -> Result<RecordingIdentityGuard> {
 }
 
 pub fn begin_operation_identity() -> Result<RecordingIdentityGuard> {
+    // Lock order matches session commits: recording scope, then current session.
+    let mut locked = RECORDING_IDENTITY
+        .write()
+        .map_err(|_| anyhow!("Recording identity lock is unavailable"))?;
+    if locked.is_some() {
+        return Err(anyhow!("A recording workspace is already locked."));
+    }
     let session =
         current_session().context("A verified Connections session is required to record.")?;
     if session.expires_at <= chrono::Utc::now().timestamp() || issuer()? != session.issuer {
@@ -287,12 +301,6 @@ pub fn begin_operation_identity() -> Result<RecordingIdentityGuard> {
         ));
     }
     let identity = session.operation_identity();
-    let mut locked = RECORDING_IDENTITY
-        .write()
-        .map_err(|_| anyhow!("Recording identity lock is unavailable"))?;
-    if locked.is_some() {
-        return Err(anyhow!("A recording workspace is already locked."));
-    }
     *locked = Some(identity.clone());
     Ok(RecordingIdentityGuard {
         identity,
@@ -321,6 +329,7 @@ pub fn connections_url() -> String {
 }
 
 async fn finish_authorization(url: Url) -> Result<AuthSession> {
+    let _tokens = TOKEN_LOCK.lock().await;
     ensure_workspace_switching_allowed().map_err(anyhow::Error::msg)?;
     let expected = PENDING
         .read()
@@ -355,7 +364,6 @@ async fn finish_authorization(url: Url) -> Result<AuthSession> {
     if metadata.issuer != pending.issuer {
         return Err(anyhow!("Connections issuer changed during sign-in."));
     }
-    let _tokens = TOKEN_LOCK.lock().await;
     let response = HTTP_CLIENT
         .post(metadata.token_endpoint)
         .form(&[
@@ -373,9 +381,35 @@ async fn finish_authorization(url: Url) -> Result<AuthSession> {
         .await?;
     let session = validate_access_token(&response.access_token).await?;
     let tokens = response.into_tokens(&session)?;
-    save_tokens(&tokens)?;
-    set_current_session(Some(session.clone()));
+    commit_authorized_session(&tokens, &session)?;
     Ok(session)
+}
+
+fn commit_authorized_session(tokens: &StoredTokens, session: &AuthSession) -> Result<()> {
+    // No await can let a recording begin between this check and the session commit.
+    let _recording = idle_recording_scope()?;
+    save_tokens(tokens)?;
+    set_current_session(Some(session.clone()));
+    Ok(())
+}
+
+fn idle_recording_scope() -> Result<std::sync::RwLockReadGuard<'static, Option<OperationIdentity>>>
+{
+    let recording = RECORDING_IDENTITY
+        .read()
+        .map_err(|_| anyhow!("Recording identity lock is unavailable"))?;
+    if recording.is_some() {
+        return Err(anyhow!("Stop and finish saving the active recording before switching workspaces or signing out."));
+    }
+    Ok(recording)
+}
+
+fn clear_pending_authorization() -> Result<()> {
+    PENDING
+        .write()
+        .map_err(|_| anyhow!("OAuth state lock is unavailable"))?
+        .take();
+    Ok(())
 }
 
 async fn refresh_tokens(current: StoredTokens) -> Result<StoredTokens> {
@@ -726,6 +760,62 @@ fn display_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_cannot_commit_if_recording_started_during_exchange() {
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        reset_test_auth();
+        let original = OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
+        set_test_session(Some(original.clone()));
+        begin_operation_identity().unwrap().commit();
+        let replacement = AuthSession {
+            user_id: "user-a".into(),
+            issuer: original.issuer.clone(),
+            organization_id: "company-b".into(),
+            workspace_id: "B1".into(),
+            expires_at: i64::MAX,
+        };
+        let tokens = StoredTokens {
+            identity: replacement.operation_identity(),
+            access_token: "unused-access".into(),
+            refresh_token: "unused-refresh".into(),
+            expires_at: i64::MAX,
+        };
+        assert!(commit_authorized_session(&tokens, &replacement).is_err());
+        assert_eq!(current_operation_identity(), Some(original.clone()));
+        assert_eq!(recording_identity(), Some(original));
+        reset_test_auth();
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_callback_cannot_restore_signed_out_session() {
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        reset_test_auth();
+        *PENDING.write().unwrap() = Some(PendingAuthorization {
+            state: "original-state".into(),
+            verifier: "unused-verifier".into(),
+            issuer: "https://connections.fractals-solutions.com/api/identity".into(),
+            resource: "https://connections.fractals-solutions.com/api/meetings".into(),
+        });
+        clear_pending_authorization().unwrap();
+        let callback = Url::parse("meetingly://oauth/callback?code=delayed-code&state=original-state&iss=https%3A%2F%2Fconnections.fractals-solutions.com%2Fapi%2Fidentity").unwrap();
+        assert!(finish_authorization(callback)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("No sign-in is pending"));
+        assert!(current_session().is_none());
+        reset_test_auth();
+    }
 
     #[test]
     fn macos_authentication_owns_the_callback_session() {
