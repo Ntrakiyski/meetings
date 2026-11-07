@@ -5,7 +5,7 @@ import { createAuthSessionRecovery, recoverAuthenticatedSession, retryPendingFin
 
 test('offline startup recovery verifies the restored session before retrying sync', async () => {
   const calls = []
-  const session = { userId: 'user-a', clerkOrgId: 'org-a', expiresAt: 1 }
+  const session = { userId: 'user-a', issuer: 'https://connections.example/api/identity', organizationId: 'company-a', workspaceId: 'A1', expiresAt: 1 }
   const invoke = async command => {
     calls.push(command)
     if (command === 'auth_get_session') return session
@@ -30,7 +30,7 @@ test('offline startup recovery does not retry without a verified session', async
 test('initial null session is recovered online before sync retry', async () => {
   const calls = []
   let online = false
-  const session = { userId: 'user-a', clerkOrgId: 'org-a', expiresAt: 1 }
+  const session = { userId: 'user-a', issuer: 'https://connections.example/api/identity', organizationId: 'company-a', workspaceId: 'A1', expiresAt: 1 }
   const recovery = createAuthSessionRecovery(async command => {
     calls.push(command)
     if (command === 'auth_get_session') return online ? session : null

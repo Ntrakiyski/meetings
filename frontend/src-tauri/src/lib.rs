@@ -42,6 +42,8 @@ pub mod audio;
 pub mod auth;
 pub mod config;
 pub mod connections;
+pub mod connections_identity;
+pub mod connections_queue;
 pub mod console_utils;
 pub mod database;
 pub mod groq;
@@ -660,6 +662,8 @@ pub fn run() {
             api::api_save_transcript,
             connections::api_publish_live_transcript,
             connections::api_retry_meeting_sync,
+            connections::api_legacy_recording_count,
+            connections::api_recover_legacy_recordings,
             auth::auth_start_sign_in,
             auth::auth_get_session,
             auth::auth_sign_out,

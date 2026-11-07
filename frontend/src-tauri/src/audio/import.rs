@@ -257,6 +257,7 @@ pub async fn start_import<R: Runtime>(
 ) -> Result<ImportResult> {
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
+    crate::auth::access_token().await?;
     let operation_identity_guard = crate::auth::begin_operation_identity()?;
     let operation_identity = operation_identity_guard.identity().clone();
     let mut saved_locally = false;
@@ -764,16 +765,19 @@ async fn create_meeting_with_transcripts(
 
     // Insert meeting
     sqlx::query(
-        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, clerk_org_id, created_by, sync_state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_final')",
+        "INSERT INTO meetings (id, title, created_at, updated_at, folder_path, clerk_org_id, created_by, connections_issuer, organization_id, workspace_id, ownership_state, sync_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'pending_final')",
     )
     .bind(&meeting_id)
     .bind(title)
     .bind(now)
     .bind(now)
     .bind(&folder_path)
-    .bind(&operation_identity.clerk_org_id)
+    .bind(format!("connections-workspace:{}", operation_identity.workspace_id))
     .bind(&operation_identity.user_id)
+    .bind(&operation_identity.issuer)
+    .bind(&operation_identity.organization_id)
+    .bind(&operation_identity.workspace_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| anyhow!("Failed to create meeting: {}", e))?;
@@ -912,9 +916,9 @@ async fn get_configured_model<R: Runtime>(
 
     let result: Option<(String, String)> =
         sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-    .fetch_optional(app_state.db_manager.pool())
-    .await
-    .map_err(|e| anyhow!("Failed to query config: {}", e))?;
+            .fetch_optional(app_state.db_manager.pool())
+            .await
+            .map_err(|e| anyhow!("Failed to query config: {}", e))?;
 
     match result {
         Some((provider, model)) => {
@@ -1101,7 +1105,13 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let identity = crate::auth::OperationIdentity::new("org-a", "user-a");
+        let identity = crate::auth::OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
+        crate::connections_queue::expand_test_ownership(&pool).await;
         let meeting_id = create_meeting_with_transcripts(
             &pool,
             "Import",
@@ -1122,23 +1132,68 @@ mod tests {
 
     #[tokio::test]
     async fn imported_pending_final_recovers_and_releases_matching_lock() {
-        let _state = crate::auth::AUTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _state = crate::auth::AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::auth::reset_test_auth();
-        let identity = crate::auth::OperationIdentity::new("org-a", "user-a");
+        let identity = crate::auth::OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
         crate::auth::set_test_session(Some(identity.clone()));
         crate::auth::begin_operation_identity().unwrap().commit();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, folder_path TEXT, clerk_org_id TEXT NOT NULL, created_by TEXT NOT NULL, sync_state TEXT NOT NULL, sync_revision INTEGER NOT NULL DEFAULT 0)").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE transcripts (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, transcript TEXT NOT NULL, enhanced_transcript TEXT, timestamp TEXT NOT NULL, speaker TEXT, audio_start_time REAL, audio_end_time REAL, duration REAL)").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE meeting_sync_queue (clerk_org_id TEXT NOT NULL, created_by TEXT NOT NULL, external_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (clerk_org_id, created_by, external_id))").execute(&pool).await.unwrap();
-        let segment = TranscriptSegment { id: "segment-1".into(), text: "Imported".into(), timestamp: "00:01".into(), speaker: None, audio_start_time: Some(1.0), audio_end_time: Some(2.0), duration: Some(1.0) };
-        create_meeting_with_transcripts(&pool, "Import", &[segment], "/tmp/import".into(), &identity).await.unwrap();
+        crate::connections_queue::expand_test_ownership(&pool).await;
+        let segment = TranscriptSegment {
+            id: "segment-1".into(),
+            text: "Imported".into(),
+            timestamp: "00:01".into(),
+            speaker: None,
+            audio_start_time: Some(1.0),
+            audio_end_time: Some(2.0),
+            duration: Some(1.0),
+        };
+        create_meeting_with_transcripts(
+            &pool,
+            "Import",
+            &[segment],
+            "/tmp/import".into(),
+            &identity,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(crate::connections::recover_pending_finals(&pool, &identity).await.unwrap(), 1);
+        assert_eq!(
+            crate::connections::recover_pending_finals(&pool, &identity)
+                .await
+                .unwrap(),
+            1
+        );
         assert!(crate::auth::finish_recording_identity_if_matches(&identity));
         assert_eq!(crate::auth::retained_test_identity(), None);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM meeting_sync_queue").fetch_one(&pool).await.unwrap(), 1);
-        assert_eq!(sqlx::query_scalar::<_, String>("SELECT sync_state FROM meetings").fetch_one(&pool).await.unwrap(), "final");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM meeting_sync_queue")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT sync_state FROM meetings")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "final"
+        );
         crate::auth::reset_test_auth();
     }
 
@@ -1183,7 +1238,8 @@ mod tests {
                 updated_at TEXT NOT NULL,
                 folder_path TEXT NOT NULL,
                 clerk_org_id TEXT NOT NULL,
-                created_by TEXT NOT NULL
+                created_by TEXT NOT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'local'
             )",
         )
         .execute(&pool)
@@ -1203,8 +1259,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let identity = crate::auth::OperationIdentity::new("org-a", "user-a");
+        let identity = crate::auth::OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
 
+        crate::connections_queue::expand_test_ownership(&pool).await;
         let meeting_id = create_meeting_with_transcripts(
             &pool,
             "Imported meeting",
@@ -1216,13 +1278,13 @@ mod tests {
         .unwrap();
 
         let owner = sqlx::query_as::<_, (String, String)>(
-            "SELECT clerk_org_id, created_by FROM meetings WHERE id = ?",
+            "SELECT workspace_id, created_by FROM meetings WHERE id = ?",
         )
         .bind(meeting_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(owner, ("org-a".to_string(), "user-a".to_string()));
+        assert_eq!(owner, ("A1".to_string(), "user-a".to_string()));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 export interface RecoveredAuthSession {
   userId: string
-  clerkOrgId: string
+  issuer: string
+  organizationId: string
+  workspaceId: string
   expiresAt: number
 }
 

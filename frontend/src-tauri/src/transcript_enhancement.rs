@@ -43,12 +43,12 @@ pub async fn api_enhance_transcript<R: Runtime>(
     }
 
     let pool = state.db_manager.pool().clone();
-    let clerk_org_id = crate::auth::require_clerk_org_id().map_err(|error| error.to_string())?;
+    let scope_key = crate::auth::require_scope_key().map_err(|error| error.to_string())?;
     let status: Option<String> = sqlx::query_scalar(
-        "SELECT transcript_enhancement_status FROM meetings WHERE id = ? AND clerk_org_id = ?",
+        "SELECT transcript_enhancement_status FROM meetings WHERE id = ? AND ownership_key = ?",
     )
     .bind(&meeting_id)
-    .bind(&clerk_org_id)
+    .bind(&scope_key)
     .fetch_optional(&pool)
     .await
     .map_err(|error| error.to_string())?;
@@ -60,27 +60,27 @@ pub async fn api_enhance_transcript<R: Runtime>(
     }
 
     sqlx::query(
-        "UPDATE meetings SET transcript_enhancement_status = 'processing', transcript_enhancement_error = NULL WHERE id = ? AND clerk_org_id = ?",
+        "UPDATE meetings SET transcript_enhancement_status = 'processing', transcript_enhancement_error = NULL WHERE id = ? AND ownership_key = ?",
     )
     .bind(&meeting_id)
-    .bind(&clerk_org_id)
+    .bind(&scope_key)
     .execute(&pool)
     .await
     .map_err(|error| error.to_string())?;
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = enhance_meeting(&app, &pool, &meeting_id, &clerk_org_id).await {
+        if let Err(error) = enhance_meeting(&app, &pool, &meeting_id, &scope_key).await {
             log::warn!(
                 "Transcript enhancement failed for {}: {:#}",
                 meeting_id,
                 error
             );
             let _ = sqlx::query(
-                "UPDATE meetings SET transcript_enhancement_status = 'failed', transcript_enhancement_error = ? WHERE id = ? AND clerk_org_id = ?",
+                "UPDATE meetings SET transcript_enhancement_status = 'failed', transcript_enhancement_error = ? WHERE id = ? AND ownership_key = ?",
             )
             .bind(error.to_string())
             .bind(&meeting_id)
-            .bind(&clerk_org_id)
+            .bind(&scope_key)
             .execute(&pool)
             .await;
         }
@@ -93,13 +93,13 @@ async fn enhance_meeting<R: Runtime>(
     app: &AppHandle<R>,
     pool: &SqlitePool,
     meeting_id: &str,
-    clerk_org_id: &str,
+    scope_key: &str,
 ) -> Result<()> {
     let raw_segments = sqlx::query_as::<_, (String, String)>(
-        "SELECT t.id, t.transcript FROM transcripts t JOIN meetings m ON m.id = t.meeting_id WHERE t.meeting_id = ? AND m.clerk_org_id = ? ORDER BY t.audio_start_time ASC, t.rowid ASC",
+        "SELECT t.id, t.transcript FROM transcripts t JOIN meetings m ON m.id = t.meeting_id WHERE t.meeting_id = ? AND m.ownership_key = ? ORDER BY t.audio_start_time ASC, t.rowid ASC",
     )
     .bind(meeting_id)
-    .bind(clerk_org_id)
+    .bind(scope_key)
     .fetch_all(pool)
     .await?;
 
@@ -145,18 +145,18 @@ async fn enhance_meeting<R: Runtime>(
         sqlx::query(
             "UPDATE transcripts SET enhanced_transcript = ? WHERE id = ? AND meeting_id = ?",
         )
-            .bind(&item.text)
-            .bind(&item.id)
-            .bind(meeting_id)
-            .execute(&mut *transaction)
-            .await?;
+        .bind(&item.text)
+        .bind(&item.id)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
     }
     sqlx::query(
-        "UPDATE meetings SET transcript_enhancement_status = 'completed', transcript_enhancement_error = NULL, updated_at = ? WHERE id = ? AND clerk_org_id = ?",
+        "UPDATE meetings SET transcript_enhancement_status = 'completed', transcript_enhancement_error = NULL, updated_at = ? WHERE id = ? AND ownership_key = ?",
     )
     .bind(chrono::Utc::now())
     .bind(meeting_id)
-    .bind(clerk_org_id)
+    .bind(scope_key)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;

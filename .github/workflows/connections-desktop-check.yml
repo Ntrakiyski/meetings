@@ -1,0 +1,71 @@
+name: Connections desktop verification
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'Cargo.*'
+      - 'llama-helper/**'
+      - '.github/workflows/connections-desktop-check.yml'
+  push:
+    branches: [codex/connections-workspace-oauth]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connections-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Verify frontend session recovery
+        run: node --test frontend/src/contexts/authRecovery.test.mjs
+      - name: Build and typecheck frontend
+        working-directory: frontend
+        run: pnpm build
+      - name: Build the native sidecar
+        run: |
+          cargo build --locked -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          native_target=$(rustc -vV | sed -n 's/^host: //p')
+          cp target/debug/llama-helper "frontend/src-tauri/binaries/llama-helper-${native_target}"
+      - name: Verify production native auth, queues, migrations and save recovery
+        run: |
+          cargo test --locked -p meetily --lib connections_
+          cargo test --locked -p meetily --lib legacy_
+          cargo test --locked -p meetily --lib auth::tests
+          cargo test --locked -p meetily --lib imported_
+          cargo test --locked -p meetily --lib existing_local_final_can_be_requeued_after_queue_failure
+      - name: Build an isolated unsigned pilot application
+        working-directory: frontend
+        run: pnpm tauri build --debug --bundles app --config '{"productName":"Meetings Connections Pilot","identifier":"com.meetily.connections-pilot","build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Package pilot application
+        run: ditto -c -k --sequesterRsrc --keepParent 'target/debug/bundle/macos/Meetings Connections Pilot.app' meetings-connections-pilot.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meetings-connections-pilot-macos
+          path: meetings-connections-pilot.zip
+          retention-days: 14

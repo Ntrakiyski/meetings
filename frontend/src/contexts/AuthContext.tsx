@@ -7,7 +7,9 @@ import { createAuthSessionRecovery } from './authRecovery.mjs'
 
 export interface AuthSession {
   userId: string
-  clerkOrgId: string
+  issuer: string
+  organizationId: string
+  workspaceId: string
   expiresAt: number
 }
 

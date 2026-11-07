@@ -85,6 +85,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+    crate::auth::access_token().await.map_err(|error| error.to_string())?;
     let recording_identity_guard =
         crate::auth::begin_recording_identity().map_err(|error| error.to_string())?;
 
@@ -354,6 +355,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+    crate::auth::access_token().await.map_err(|error| error.to_string())?;
     let recording_identity_guard =
         crate::auth::begin_recording_identity().map_err(|error| error.to_string())?;
 

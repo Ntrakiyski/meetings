@@ -28,6 +28,7 @@ import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioF
 import { AuthProvider } from '@/contexts/AuthContext'
 import { AuthGate } from '@/components/AuthGate'
 import { AuthToolbar } from '@/components/AuthToolbar'
+import { LegacyRecordingNotice } from '@/components/LegacyRecordingNotice'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -237,9 +238,10 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${sourceSans3.variable} font-sans antialiased`}>
         <AuthProvider>
+          <RecordingStateProvider>
+          <LegacyRecordingNotice />
           <AuthGate>
             <AnalyticsProvider>
-              <RecordingStateProvider>
                 <AuthToolbar />
             <TranscriptProvider>
               <ConfigProvider>
@@ -279,9 +281,9 @@ export default function RootLayout({
                 </OllamaDownloadProvider>
               </ConfigProvider>
             </TranscriptProvider>
-              </RecordingStateProvider>
             </AnalyticsProvider>
           </AuthGate>
+          </RecordingStateProvider>
         </AuthProvider>
 
         <Toaster position="bottom-center" richColors closeButton />

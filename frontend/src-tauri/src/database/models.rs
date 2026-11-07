@@ -12,6 +12,10 @@ pub struct MeetingModel {
     pub transcript_enhancement_status: String,
     pub transcript_enhancement_error: Option<String>,
     pub clerk_org_id: String,
+    pub connections_issuer: Option<String>,
+    pub organization_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub ownership_state: String,
     pub created_by: String,
     pub sync_state: String,
     pub sync_revision: i64,
@@ -57,7 +61,7 @@ pub struct SummaryProcess {
     pub end_time: Option<chrono::DateTime<chrono::Utc>>,
     pub chunk_count: i64,
     pub processing_time: f64,
-    pub metadata: Option<String>, // JSON
+    pub metadata: Option<String>,      // JSON
     pub result_backup: Option<String>, // Backup of result before regeneration
     pub result_backup_timestamp: Option<chrono::DateTime<chrono::Utc>>, // When backup was created
 }

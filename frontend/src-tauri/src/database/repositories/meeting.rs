@@ -8,13 +8,13 @@ pub struct MeetingsRepository;
 
 impl MeetingsRepository {
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
         let meetings = sqlx::query_as::<_, MeetingModel>(
-            "SELECT * FROM meetings WHERE clerk_org_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM meetings WHERE ownership_key = ? ORDER BY created_at DESC",
         )
-        .bind(clerk_org_id)
-                .fetch_all(pool)
-                .await?;
+        .bind(scope_key)
+        .fetch_all(pool)
+        .await?;
         Ok(meetings)
     }
 
@@ -28,8 +28,8 @@ impl MeetingsRepository {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
 
-        let clerk_org_id = current_org()?;
-        match delete_meeting_with_transaction(&mut transaction, meeting_id, &clerk_org_id).await {
+        let scope_key = current_scope()?;
+        match delete_meeting_with_transaction(&mut transaction, meeting_id, &scope_key).await {
             Ok(success) => {
                 if success {
                     transaction.commit().await?;
@@ -63,13 +63,13 @@ impl MeetingsRepository {
 
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
 
         // Get meeting details
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error, clerk_org_id, created_by, sync_state, sync_revision FROM meetings WHERE id = ? AND clerk_org_id = ?")
+            sqlx::query_as("SELECT * FROM meetings WHERE id = ? AND ownership_key = ?")
                 .bind(meeting_id)
-                .bind(&clerk_org_id)
+                .bind(&scope_key)
                 .fetch_optional(&mut *transaction)
                 .await?;
 
@@ -131,9 +131,9 @@ impl MeetingsRepository {
         }
 
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error, clerk_org_id, created_by, sync_state, sync_revision FROM meetings WHERE id = ? AND clerk_org_id = ?")
+            sqlx::query_as("SELECT * FROM meetings WHERE id = ? AND ownership_key = ?")
                 .bind(meeting_id)
-                .bind(current_org()?)
+                .bind(current_scope()?)
                 .fetch_optional(pool)
                 .await?;
 
@@ -154,24 +154,24 @@ impl MeetingsRepository {
         }
 
         // Get total count of transcripts for this meeting
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
         let total: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM transcripts t JOIN meetings m ON m.id = t.meeting_id WHERE t.meeting_id = ? AND m.clerk_org_id = ?"
+            "SELECT COUNT(*) FROM transcripts t JOIN meetings m ON m.id = t.meeting_id WHERE t.meeting_id = ? AND m.ownership_key = ?"
         )
         .bind(meeting_id)
-        .bind(&clerk_org_id)
+        .bind(&scope_key)
         .fetch_one(pool)
         .await?;
 
         // Get paginated transcripts ordered by audio_start_time
         let transcripts = sqlx::query_as::<_, Transcript>(
             "SELECT t.* FROM transcripts t JOIN meetings m ON m.id = t.meeting_id
-             WHERE t.meeting_id = ? AND m.clerk_org_id = ?
+             WHERE t.meeting_id = ? AND m.ownership_key = ?
              ORDER BY audio_start_time ASC
              LIMIT ? OFFSET ?",
         )
         .bind(meeting_id)
-        .bind(&clerk_org_id)
+        .bind(&scope_key)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
@@ -195,17 +195,17 @@ impl MeetingsRepository {
         let mut transaction = conn.begin().await?;
 
         let now = Utc::now().naive_utc();
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
 
         let rows_affected = sqlx::query(
-            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND clerk_org_id = ?",
+            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND ownership_key = ?",
         )
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-        .bind(clerk_org_id)
-                .execute(&mut *transaction)
-                .await?;
+        .bind(new_title)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(scope_key)
+        .execute(&mut *transaction)
+        .await?;
         if rows_affected.rows_affected() == 0 {
             transaction.rollback().await?;
             return Ok(false);
@@ -221,18 +221,18 @@ impl MeetingsRepository {
     ) -> Result<bool, SqlxError> {
         let mut transaction = pool.begin().await?;
         let now = Utc::now();
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
 
         // Update meetings table
         let meeting_update = sqlx::query(
-            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND clerk_org_id = ?",
+            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND ownership_key = ?",
         )
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-        .bind(clerk_org_id)
-                .execute(&mut *transaction)
-                .await?;
+        .bind(new_title)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(scope_key)
+        .execute(&mut *transaction)
+        .await?;
 
         if meeting_update.rows_affected() == 0 {
             transaction.rollback().await?;
@@ -254,15 +254,15 @@ impl MeetingsRepository {
 async fn delete_meeting_with_transaction(
     transaction: &mut SqliteConnection,
     meeting_id: &str,
-    clerk_org_id: &str,
+    scope_key: &str,
 ) -> Result<bool, SqlxError> {
     // Check if meeting exists
     let meeting_exists: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
-        .bind(meeting_id)
-            .bind(clerk_org_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
+        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND ownership_key = ?")
+            .bind(meeting_id)
+            .bind(scope_key)
+            .fetch_optional(&mut *transaction)
+            .await?;
 
     if meeting_exists.is_none() {
         error!("Meeting {} not found for deletion", meeting_id);
@@ -289,15 +289,15 @@ async fn delete_meeting_with_transaction(
         .await?;
 
     // 4. Finally, delete the meeting
-    let result = sqlx::query("DELETE FROM meetings WHERE id = ? AND clerk_org_id = ?")
+    let result = sqlx::query("DELETE FROM meetings WHERE id = ? AND ownership_key = ?")
         .bind(meeting_id)
-        .bind(clerk_org_id)
+        .bind(scope_key)
         .execute(&mut *transaction)
         .await?;
 
     Ok(result.rows_affected() > 0)
 }
 
-fn current_org() -> Result<String, SqlxError> {
-    crate::auth::require_clerk_org_id().map_err(|error| SqlxError::Protocol(error.to_string()))
+fn current_scope() -> Result<String, SqlxError> {
+    crate::auth::require_scope_key().map_err(|error| SqlxError::Protocol(error.to_string()))
 }
