@@ -32,7 +32,11 @@ impl DatabaseManager {
 
         let pool = SqlitePool::connect(tauri_db_path).await?;
 
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        super::legacy_preservation::migrate_preserving_legacy(
+            &pool,
+            &sqlx::migrate!("./migrations"),
+        )
+        .await?;
 
         Ok(DatabaseManager { pool })
     }
@@ -104,7 +108,10 @@ impl DatabaseManager {
                             Ok(db_manager)
                         }
                         Err(retry_err) => {
-                            log::error!("Database connection failed even after WAL cleanup: {}", retry_err);
+                            log::error!(
+                                "Database connection failed even after WAL cleanup: {}",
+                                retry_err
+                            );
                             Err(retry_err)
                         }
                     }

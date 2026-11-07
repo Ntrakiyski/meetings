@@ -214,8 +214,8 @@ async fn run_retranscription<R: Runtime>(
     // Decode the audio file (CPU-intensive, run in blocking task)
     let path_for_decode = audio_path.clone();
     let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path_for_decode))
-    .await
-    .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
+        .await
+        .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
     let duration_seconds = decoded.duration_seconds;
 
     info!(
@@ -238,8 +238,8 @@ async fn run_retranscription<R: Runtime>(
 
     // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
     let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
-    .await
-    .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
     info!(
         "Converted to 16kHz mono format: {} samples",
         audio_samples.len()
@@ -493,11 +493,11 @@ async fn run_retranscription<R: Runtime>(
 
     // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();
-    let clerk_org_id = crate::auth::require_clerk_org_id()?;
+    let scope_key = crate::auth::require_scope_key()?;
     let owns_meeting: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
+        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND ownership_key = ?")
             .bind(&meeting_id)
-            .bind(clerk_org_id)
+            .bind(scope_key)
             .fetch_optional(pool)
             .await?;
     if owns_meeting.is_none() {
@@ -679,21 +679,21 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
     debug!("Getting configured Whisper model from database...");
 
     let app_state = app.try_state::<AppState>().ok_or_else(|| {
-            error!("App state not available");
-            anyhow!("App state not available")
-        })?;
+        error!("App state not available");
+        anyhow!("App state not available")
+    })?;
 
     debug!("Querying transcript_settings table...");
 
     // Query the transcript settings from the database - get both provider and model
     let result: Option<(String, String)> =
         sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-    .fetch_optional(app_state.db_manager.pool())
-    .await
-    .map_err(|e| {
-        error!("Failed to query transcript config: {}", e);
-        anyhow!("Failed to query transcript config: {}", e)
-    })?;
+            .fetch_optional(app_state.db_manager.pool())
+            .await
+            .map_err(|e| {
+                error!("Failed to query transcript config: {}", e);
+                anyhow!("Failed to query transcript config: {}", e)
+            })?;
 
     match result {
         Some((provider, model)) => {
@@ -797,19 +797,19 @@ async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result
     debug!("Getting configured Parakeet model from database...");
 
     let app_state = app.try_state::<AppState>().ok_or_else(|| {
-            error!("App state not available");
-            anyhow!("App state not available")
-        })?;
+        error!("App state not available");
+        anyhow!("App state not available")
+    })?;
 
     // Query the transcript settings from the database
     let result: Option<(String, String)> =
         sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-    .fetch_optional(app_state.db_manager.pool())
-    .await
-    .map_err(|e| {
-        error!("Failed to query transcript config: {}", e);
-        anyhow!("Failed to query transcript config: {}", e)
-    })?;
+            .fetch_optional(app_state.db_manager.pool())
+            .await
+            .map_err(|e| {
+                error!("Failed to query transcript config: {}", e);
+                anyhow!("Failed to query transcript config: {}", e)
+            })?;
 
     match result {
         Some((provider, model)) => {
@@ -976,9 +976,9 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_multiple() {
         let transcripts = vec![
-            ("First segment".to_string(), 0.0, 2000.0),      // 0-2 seconds
-            ("Second segment".to_string(), 3000.0, 5000.0),  // 3-5 seconds
-            ("Third segment".to_string(), 6500.0, 8000.0),   // 6.5-8 seconds
+            ("First segment".to_string(), 0.0, 2000.0), // 0-2 seconds
+            ("Second segment".to_string(), 3000.0, 5000.0), // 3-5 seconds
+            ("Third segment".to_string(), 6500.0, 8000.0), // 6.5-8 seconds
         ];
         let segments = create_transcript_segments(&transcripts);
 

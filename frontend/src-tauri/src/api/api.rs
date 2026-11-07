@@ -182,21 +182,7 @@ pub struct SaveTranscriptRequest {
     pub transcripts: Vec<TranscriptSegment>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TranscriptSegment {
-    pub id: String,
-    pub text: String,
-    pub timestamp: String,
-    #[serde(default, alias = "source", skip_serializing_if = "Option::is_none")]
-    pub speaker: Option<String>,
-    // NEW: Recording-relative timestamps for playback synchronization
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_start_time: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_end_time: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration: Option<f64>,
-}
+pub use crate::connections_queue::TranscriptSegment;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Profile {
@@ -1043,9 +1029,9 @@ pub async fn api_save_transcript<R: Runtime>(
                 None,
                 "final",
                 None,
-                    None,
-                )
-                .await
+                None,
+            )
+            .await
             .map_err(|error| format!("Failed to queue meeting sync: {error}"))?;
             crate::connections::retry_queued_meetings(pool.clone(), operation_identity);
             Ok(serde_json::json!({
@@ -1078,11 +1064,11 @@ async fn requeue_existing_final(
     let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
             SELECT 1 FROM meetings
-            WHERE id = ? AND clerk_org_id = ? AND created_by = ?
+            WHERE id = ? AND ownership_key = ? AND created_by = ?
         )",
     )
     .bind(meeting_id)
-    .bind(&identity.clerk_org_id)
+    .bind(&identity.scope_key())
     .bind(&identity.user_id)
     .fetch_one(pool)
     .await
@@ -1117,17 +1103,16 @@ pub async fn open_meeting_folder<R: Runtime>(
     log_info!("open_meeting_folder called for meeting_id: {}", meeting_id);
 
     let pool = state.db_manager.pool();
-    let clerk_org_id = crate::auth::require_clerk_org_id().map_err(|error| error.to_string())?;
+    let scope_key = crate::auth::require_scope_key().map_err(|error| error.to_string())?;
 
     // Get meeting with folder_path
-    let meeting: Option<MeetingModel> = sqlx::query_as(
-        "SELECT id, title, created_at, updated_at, folder_path, transcript_enhancement_status, transcript_enhancement_error, clerk_org_id, created_by, sync_state, sync_revision FROM meetings WHERE id = ? AND clerk_org_id = ?",
-    )
-    .bind(&meeting_id)
-    .bind(&clerk_org_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
+    let meeting: Option<MeetingModel> =
+        sqlx::query_as("SELECT * FROM meetings WHERE id = ? AND ownership_key = ?")
+            .bind(&meeting_id)
+            .bind(&scope_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Database error: {}", e))?;
 
     match meeting {
         Some(m) => {
@@ -1450,7 +1435,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                                             .get("message")
                                             .and_then(|m| {
                                                 m.get("content")
-                                                .or_else(|| m.get("reasoning_content"))
+                                                    .or_else(|| m.get("reasoning_content"))
                                             })
                                             .is_some();
 
@@ -1528,7 +1513,8 @@ mod durability_tests {
                 clerk_org_id TEXT NOT NULL,
                 created_by TEXT NOT NULL,
                 sync_state TEXT NOT NULL,
-                sync_revision INTEGER NOT NULL DEFAULT 0
+                sync_revision INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '2026-07-20'
             )",
         )
         .execute(&pool)
@@ -1548,11 +1534,17 @@ mod durability_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO meetings (id, clerk_org_id, created_by, sync_state) VALUES ('meeting-1', 'org-a', 'user-a', 'pending_final')")
+        crate::connections_queue::expand_test_ownership(&pool).await;
+        sqlx::query("INSERT INTO meetings (id, clerk_org_id, created_by, connections_issuer, organization_id, workspace_id, ownership_state, sync_state) VALUES ('meeting-1', 'org-a', 'user-a', 'https://connections.fractals-solutions.com/api/identity', 'company-a', 'A1', 'verified', 'pending_final')")
             .execute(&pool)
             .await
             .unwrap();
-        let identity = crate::auth::OperationIdentity::new("org-a", "user-a");
+        let identity = crate::auth::OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
 
         let recovered =
             requeue_existing_final(&pool, &identity, Some("meeting-1"), "Recovered final", &[])

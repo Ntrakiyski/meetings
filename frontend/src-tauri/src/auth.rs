@@ -9,13 +9,24 @@ use tauri::{App, AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_deep_link::DeepLinkExt;
 use url::Url;
 
-const REDIRECT_URI: &str = "meetingly://oauth/callback";
-const SCOPES: &str = "openid profile email user:org:read";
-const KEYCHAIN_SERVICE: &str = "meetingly-clerk-oauth";
+pub use crate::connections_identity::OperationIdentity;
+use crate::connections_identity::{
+    normalized_origin, validate_callback, OAuthMetadata, VerifiedIdentity, CLIENT_ID, CONTRACT,
+    REDIRECT_URI, SCOPES,
+};
+const KEYCHAIN_SERVICE: &str = "meetingly-connections-oauth-v1";
 const KEYCHAIN_ACCOUNT: &str = "session";
 const CONNECTIONS_DEFAULT_URL: &str = "https://connections.fractals-solutions.com";
 
 static CURRENT_SESSION: Lazy<RwLock<Option<AuthSession>>> = Lazy::new(|| RwLock::new(None));
+static TOKEN_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("valid Connections identity HTTP client")
+});
 static PENDING: Lazy<RwLock<Option<PendingAuthorization>>> = Lazy::new(|| RwLock::new(None));
 static RECORDING_IDENTITY: Lazy<RwLock<Option<OperationIdentity>>> =
     Lazy::new(|| RwLock::new(None));
@@ -34,21 +45,6 @@ fn authentication_surface_for(target_os: &str) -> AuthenticationSurface {
         AuthenticationSurface::SystemSession
     } else {
         AuthenticationSurface::ExternalBrowser
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OperationIdentity {
-    pub clerk_org_id: String,
-    pub user_id: String,
-}
-
-impl OperationIdentity {
-    pub fn new(clerk_org_id: impl Into<String>, user_id: impl Into<String>) -> Self {
-        Self {
-            clerk_org_id: clerk_org_id.into(),
-            user_id: user_id.into(),
-        }
     }
 }
 
@@ -79,12 +75,15 @@ impl Drop for RecordingIdentityGuard {
 #[serde(rename_all = "camelCase")]
 pub struct AuthSession {
     pub user_id: String,
-    pub clerk_org_id: String,
+    pub issuer: String,
+    pub organization_id: String,
+    pub workspace_id: String,
     pub expires_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredTokens {
+    identity: OperationIdentity,
     access_token: String,
     refresh_token: String,
     expires_at: i64,
@@ -94,36 +93,17 @@ struct StoredTokens {
 struct PendingAuthorization {
     state: String,
     verifier: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthMetadata {
-    authorization_endpoint: String,
-    token_endpoint: String,
-    revocation_endpoint: Option<String>,
+    issuer: String,
+    resource: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
+    connections_contract: String,
+    token_type: String,
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccessClaims {
-    sub: String,
-    org_id: String,
-    aud: Option<serde_json::Value>,
-    exp: i64,
-    iss: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VerifiedSession {
-    user_id: String,
-    session_claims: serde_json::Value,
 }
 
 pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
@@ -134,7 +114,7 @@ pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
             let app = handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = finish_authorization_and_emit(&app, callback).await {
-                    log::error!("Clerk OAuth callback failed: {error}");
+                    log::error!("Connections OAuth callback failed: {error}");
                 }
             });
         }
@@ -147,12 +127,13 @@ pub fn setup_deep_links<R: Runtime>(app: &App<R>) -> Result<()> {
 
 #[tauri::command]
 pub async fn auth_start_sign_in(app: AppHandle) -> std::result::Result<(), String> {
-    ensure_organization_switching_allowed()?;
+    ensure_workspace_switching_allowed()?;
     let authorization_url = prepare_authorization_url().await.map_err(display_error)?;
     launch_authorization(&app, authorization_url).await
 }
 
 async fn prepare_authorization_url() -> Result<Url> {
+    let _tokens = TOKEN_LOCK.lock().await;
     let metadata = metadata().await?;
     let verifier = random_urlsafe(32);
     let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(
@@ -164,17 +145,26 @@ async fn prepare_authorization_url() -> Result<Url> {
     authorization_url
         .query_pairs_mut()
         .append_pair("response_type", "code")
-        .append_pair("client_id", &client_id()?)
+        .append_pair("client_id", CLIENT_ID)
         .append_pair("redirect_uri", REDIRECT_URI)
         .append_pair("scope", SCOPES)
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("prompt", "consent");
+        .append_pair("prompt", "consent")
+        .append_pair(
+            "resource",
+            &format!("{}/api/meetings", normalized_origin(&connections_url())?),
+        );
+    let _recording = idle_recording_scope()?;
     *PENDING
         .write()
-        .map_err(|_| anyhow!("OAuth state lock is unavailable"))? =
-        Some(PendingAuthorization { state, verifier });
+        .map_err(|_| anyhow!("OAuth state lock is unavailable"))? = Some(PendingAuthorization {
+        state,
+        verifier,
+        issuer: metadata.issuer,
+        resource: format!("{}/api/meetings", normalized_origin(&connections_url())?),
+    });
     Ok(authorization_url)
 }
 
@@ -183,7 +173,7 @@ pub async fn auth_get_session() -> std::result::Result<Option<AuthSession>, Stri
     match access_token().await {
         Ok(_) => Ok(current_session()),
         Err(error) => {
-            log::warn!("No usable Clerk session: {error:#}");
+            log::warn!("No usable Connections session: {error:#}");
             Ok(None)
         }
     }
@@ -191,35 +181,55 @@ pub async fn auth_get_session() -> std::result::Result<Option<AuthSession>, Stri
 
 #[tauri::command]
 pub async fn auth_sign_out() -> std::result::Result<(), String> {
-    ensure_organization_switching_allowed()?;
-    if let Ok(tokens) = load_tokens() {
+    let _tokens = TOKEN_LOCK.lock().await;
+    // Clear local authority before awaiting revocation, while recording startup is excluded.
+    let previous = {
+        let _recording = idle_recording_scope().map_err(display_error)?;
+        let previous = load_tokens().ok();
+        delete_tokens().map_err(display_error)?;
+        clear_pending_authorization().map_err(display_error)?;
+        set_current_session(None);
+        previous
+    };
+    if let Some(tokens) = previous {
         if let Ok(metadata) = metadata().await {
             if let Some(endpoint) = metadata.revocation_endpoint {
-                let _ = reqwest::Client::new()
+                let _ = HTTP_CLIENT
                     .post(endpoint)
                     .form(&[
                         ("token", tokens.refresh_token),
-                        ("client_id", client_id().unwrap_or_default()),
+                        ("client_id", CLIENT_ID.to_string()),
                     ])
                     .send()
                     .await;
             }
         }
     }
-    delete_tokens().map_err(display_error)?;
-    set_current_session(None);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn auth_open_profile(app: AppHandle) -> std::result::Result<(), String> {
-    open_portal(&app, "user").await
+    let _ = app;
+    crate::api::api::open_external_url(format!(
+        "{}/account/security",
+        normalized_origin(&connections_url()).map_err(display_error)?
+    ))
+    .await
 }
 
 #[tauri::command]
 pub async fn auth_open_organization(app: AppHandle) -> std::result::Result<(), String> {
-    ensure_organization_switching_allowed()?;
-    open_portal(&app, "organization").await
+    ensure_workspace_switching_allowed()?;
+    let _ = app;
+    let identity = require_current_operation_identity().map_err(display_error)?;
+    let mut url = Url::parse(&normalized_origin(&connections_url()).map_err(display_error)?)
+        .map_err(display_error)?;
+    url.path_segments_mut()
+        .map_err(|_| "Connections origin cannot have path segments.".to_string())?
+        .push("companies")
+        .push(&identity.organization_id);
+    crate::api::api::open_external_url(url.to_string()).await
 }
 
 #[tauri::command]
@@ -228,32 +238,36 @@ pub fn auth_finish_recording_scope() -> std::result::Result<(), String> {
     if finish_recording_identity_if_matches(&identity) {
         Ok(())
     } else {
-        Err("The retained recording belongs to a different Clerk user or organization.".to_string())
+        Err(
+            "The retained recording belongs to a different Connections user or organization."
+                .to_string(),
+        )
     }
 }
 
 pub async fn access_token() -> Result<String> {
+    let _tokens = TOKEN_LOCK.lock().await;
     let mut tokens = load_tokens()?;
     if tokens.expires_at <= chrono::Utc::now().timestamp() + 60 {
         tokens = refresh_tokens(tokens).await?;
         save_tokens(&tokens)?;
     }
     let session = validate_access_token(&tokens.access_token).await?;
+    if session.operation_identity() != tokens.identity {
+        return Err(anyhow!(
+            "The stored token belongs to another Connections workspace or user."
+        ));
+    }
     set_current_session(Some(session));
     Ok(tokens.access_token)
 }
 
-pub fn require_clerk_org_id() -> Result<String> {
-    if let Some(identity) = recording_identity() {
-        return Ok(identity.clerk_org_id);
-    }
-    require_current_clerk_org_id()
+pub fn require_scope_key() -> Result<String> {
+    Ok(require_operation_identity()?.scope_key())
 }
 
-pub fn require_current_clerk_org_id() -> Result<String> {
-    current_session()
-        .map(|session| session.clerk_org_id)
-        .ok_or_else(|| anyhow!("A Clerk organization is required."))
+pub fn require_current_scope_key() -> Result<String> {
+    Ok(require_current_operation_identity()?.scope_key())
 }
 
 pub fn require_user_id() -> Result<String> {
@@ -264,9 +278,7 @@ pub fn require_user_id() -> Result<String> {
 }
 
 pub fn require_current_user_id() -> Result<String> {
-    current_session()
-        .map(|session| session.user_id)
-        .ok_or_else(|| anyhow!("A Clerk user is required."))
+    Ok(require_current_operation_identity()?.user_id)
 }
 
 pub fn begin_recording_identity() -> Result<RecordingIdentityGuard> {
@@ -274,14 +286,21 @@ pub fn begin_recording_identity() -> Result<RecordingIdentityGuard> {
 }
 
 pub fn begin_operation_identity() -> Result<RecordingIdentityGuard> {
-    let session = current_session().context("A verified Clerk session is required to record.")?;
-    let identity = OperationIdentity::new(session.clerk_org_id, session.user_id);
+    // Lock order matches session commits: recording scope, then current session.
     let mut locked = RECORDING_IDENTITY
         .write()
         .map_err(|_| anyhow!("Recording identity lock is unavailable"))?;
     if locked.is_some() {
-        return Err(anyhow!("A recording organization is already locked."));
+        return Err(anyhow!("A recording workspace is already locked."));
     }
+    let session =
+        current_session().context("A verified Connections session is required to record.")?;
+    if session.expires_at <= chrono::Utc::now().timestamp() || issuer()? != session.issuer {
+        return Err(anyhow!(
+            "Sign in to Connections before starting a new recording."
+        ));
+    }
+    let identity = session.operation_identity();
     *locked = Some(identity.clone());
     Ok(RecordingIdentityGuard {
         identity,
@@ -292,11 +311,11 @@ pub fn begin_operation_identity() -> Result<RecordingIdentityGuard> {
 pub fn require_operation_identity() -> Result<OperationIdentity> {
     recording_identity()
         .or_else(current_operation_identity)
-        .context("A Clerk organization is required.")
+        .context("A Connections workspace is required.")
 }
 
 pub fn require_current_operation_identity() -> Result<OperationIdentity> {
-    current_operation_identity().context("A Clerk organization is required.")
+    current_operation_identity().context("A Connections workspace is required.")
 }
 
 pub fn connections_url() -> String {
@@ -310,40 +329,50 @@ pub fn connections_url() -> String {
 }
 
 async fn finish_authorization(url: Url) -> Result<AuthSession> {
-    ensure_organization_switching_allowed().map_err(anyhow::Error::msg)?;
-    if url.scheme() != "meetingly" || url.host_str() != Some("oauth") || url.path() != "/callback" {
-        return Err(anyhow!("Unexpected OAuth callback URL."));
+    let _tokens = TOKEN_LOCK.lock().await;
+    ensure_workspace_switching_allowed().map_err(anyhow::Error::msg)?;
+    let expected = PENDING
+        .read()
+        .map_err(|_| anyhow!("OAuth state lock is unavailable"))?
+        .clone()
+        .context("No sign-in is pending.")?;
+    validate_callback(&url, &expected.state, &expected.issuer)?;
+    if issuer()? != expected.issuer {
+        return Err(anyhow!(
+            "Changing Connections issuer requires a new sign-in."
+        ));
     }
+    let pending = {
+        let mut locked = PENDING
+            .write()
+            .map_err(|_| anyhow!("OAuth state lock is unavailable"))?;
+        if locked.as_ref().map(|pending| pending.state.as_str()) != Some(expected.state.as_str()) {
+            return Err(anyhow!("OAuth state changed during callback handling."));
+        }
+        locked.take().context("No sign-in is pending.")?
+    };
     let params = url
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
     if let Some(error) = params.get("error") {
-        return Err(anyhow!("Clerk rejected sign-in: {error}"));
+        return Err(anyhow!("Connections rejected sign-in: {error}"));
     }
     let code = params
         .get("code")
         .context("OAuth callback did not include a code.")?;
-    let state = params
-        .get("state")
-        .context("OAuth callback did not include state.")?;
-    let pending = PENDING
-        .write()
-        .map_err(|_| anyhow!("OAuth state lock is unavailable"))?
-        .take()
-        .context("No sign-in is pending.")?;
-    if state.as_ref() != pending.state {
-        return Err(anyhow!("OAuth state did not match."));
-    }
     let metadata = metadata().await?;
-    let client_id = client_id()?;
-    let response = reqwest::Client::new()
+    if metadata.issuer != pending.issuer {
+        return Err(anyhow!("Connections issuer changed during sign-in."));
+    }
+    let response = HTTP_CLIENT
         .post(metadata.token_endpoint)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code.as_ref()),
-            ("client_id", client_id.as_str()),
+            ("client_id", CLIENT_ID),
             ("redirect_uri", REDIRECT_URI),
             ("code_verifier", pending.verifier.as_str()),
+            ("resource", pending.resource.as_str()),
         ])
         .send()
         .await?
@@ -351,29 +380,52 @@ async fn finish_authorization(url: Url) -> Result<AuthSession> {
         .json::<TokenResponse>()
         .await?;
     let session = validate_access_token(&response.access_token).await?;
-    let tokens = StoredTokens {
-        access_token: response.access_token,
-        refresh_token: response
-            .refresh_token
-            .context("Clerk did not return a refresh token.")?,
-        expires_at: response
-            .expires_in
-            .map(|seconds| chrono::Utc::now().timestamp() + seconds)
-            .unwrap_or(session.expires_at),
-    };
-    save_tokens(&tokens)?;
-    set_current_session(Some(session.clone()));
+    let tokens = response.into_tokens(&session)?;
+    commit_authorized_session(&tokens, &session)?;
     Ok(session)
 }
 
+fn commit_authorized_session(tokens: &StoredTokens, session: &AuthSession) -> Result<()> {
+    // No await can let a recording begin between this check and the session commit.
+    let _recording = idle_recording_scope()?;
+    save_tokens(tokens)?;
+    set_current_session(Some(session.clone()));
+    Ok(())
+}
+
+fn idle_recording_scope() -> Result<std::sync::RwLockReadGuard<'static, Option<OperationIdentity>>>
+{
+    let recording = RECORDING_IDENTITY
+        .read()
+        .map_err(|_| anyhow!("Recording identity lock is unavailable"))?;
+    if recording.is_some() {
+        return Err(anyhow!("Stop and finish saving the active recording before switching workspaces or signing out."));
+    }
+    Ok(recording)
+}
+
+fn clear_pending_authorization() -> Result<()> {
+    PENDING
+        .write()
+        .map_err(|_| anyhow!("OAuth state lock is unavailable"))?
+        .take();
+    Ok(())
+}
+
 async fn refresh_tokens(current: StoredTokens) -> Result<StoredTokens> {
-    let client_id = client_id()?;
-    let response = reqwest::Client::new()
+    if current.identity.issuer != issuer()? {
+        return Err(anyhow!(
+            "Changing Connections issuer requires a new sign-in."
+        ));
+    }
+    let resource = format!("{}/api/meetings", normalized_origin(&connections_url())?);
+    let response = HTTP_CLIENT
         .post(metadata().await?.token_endpoint)
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", current.refresh_token.as_str()),
-            ("client_id", client_id.as_str()),
+            ("client_id", CLIENT_ID),
+            ("resource", resource.as_str()),
         ])
         .send()
         .await?
@@ -381,93 +433,94 @@ async fn refresh_tokens(current: StoredTokens) -> Result<StoredTokens> {
         .json::<TokenResponse>()
         .await?;
     let session = validate_access_token(&response.access_token).await?;
-    Ok(StoredTokens {
-        access_token: response.access_token,
-        refresh_token: response.refresh_token.unwrap_or(current.refresh_token),
-        expires_at: response
-            .expires_in
-            .map(|seconds| chrono::Utc::now().timestamp() + seconds)
-            .unwrap_or(session.expires_at),
-    })
+    if session.operation_identity() != current.identity {
+        return Err(anyhow!(
+            "Refresh cannot change the original workspace or user."
+        ));
+    }
+    response.into_tokens(&session)
 }
 
 async fn metadata() -> Result<OAuthMetadata> {
-    let url = format!("{}/.well-known/oauth-authorization-server", issuer()?);
-    Ok(reqwest::Client::new()
-        .get(url)
+    let origin = normalized_origin(&connections_url())?;
+    let metadata: OAuthMetadata = HTTP_CLIENT
+        .get(format!(
+            "{origin}/.well-known/oauth-authorization-server/api/identity"
+        ))
         .send()
         .await?
         .error_for_status()?
         .json()
-        .await?)
+        .await?;
+    metadata.validate(&origin)?;
+    Ok(metadata)
 }
 
 async fn validate_access_token(token: &str) -> Result<AuthSession> {
-    let payload = token
-        .split('.')
-        .nth(1)
-        .context("Clerk access token is not a JWT.")?;
-    let claims: AccessClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
-    let client_id = client_id()?;
-    if claims.iss.trim_end_matches('/') != issuer()?
-        || claims
-            .aud
-            .as_ref()
-            .is_some_and(|audience| !audience_contains(audience, &client_id))
-    {
-        return Err(anyhow!("Clerk access token issuer or audience is invalid."));
+    if !token.starts_with("cma_") {
+        return Err(anyhow!("A Connections Meetings access token is required."));
     }
-    if claims.exp <= chrono::Utc::now().timestamp() {
-        return Err(anyhow!("Clerk access token has expired."));
-    }
-    let verified = reqwest::Client::new()
-        .get(format!("{}/api/auth/session", connections_url()))
+    let origin = normalized_origin(&connections_url())?;
+    let verified = HTTP_CLIENT
+        .get(format!("{origin}/api/meetings-identity"))
         .bearer_auth(token)
         .send()
         .await?
         .error_for_status()?
-        .json::<VerifiedSession>()
+        .json::<VerifiedIdentity>()
         .await?;
-    let verified_org = verified
-        .session_claims
-        .get("org_id")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            verified
-                .session_claims
-                .get("o")
-                .and_then(|organization| organization.get("id"))
-                .and_then(serde_json::Value::as_str)
-        });
-    if verified.user_id != claims.sub || verified_org != Some(claims.org_id.as_str()) {
-        return Err(anyhow!(
-            "Connections rejected the Clerk user or organization."
-        ));
-    }
+    let identity = verified.identity(
+        &format!("{origin}/api/identity"),
+        chrono::Utc::now().timestamp(),
+    )?;
     Ok(AuthSession {
-        user_id: claims.sub,
-        clerk_org_id: claims.org_id,
-        expires_at: claims.exp,
+        issuer: identity.issuer,
+        organization_id: identity.organization_id,
+        workspace_id: identity.workspace_id,
+        user_id: identity.user_id,
+        expires_at: verified.expires_at,
     })
 }
 
-fn audience_contains(audience: &serde_json::Value, client_id: &str) -> bool {
-    audience.as_str() == Some(client_id)
-        || audience
-            .as_array()
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(client_id)))
+impl AuthSession {
+    pub fn operation_identity(&self) -> OperationIdentity {
+        OperationIdentity::new(
+            &self.issuer,
+            &self.organization_id,
+            &self.workspace_id,
+            &self.user_id,
+        )
+    }
 }
 
-async fn open_portal(app: &AppHandle, path: &str) -> std::result::Result<(), String> {
-    let return_url = prepare_authorization_url().await.map_err(display_error)?;
-    let url = portal_url(
-        &account_portal_url().map_err(display_error)?,
-        path,
-        return_url.as_str(),
-    )
-    .map_err(display_error)?;
-    let url = Url::parse(&url).map_err(display_error)?;
-    launch_authorization(app, url).await
+impl TokenResponse {
+    fn into_tokens(self, session: &AuthSession) -> Result<StoredTokens> {
+        let seconds = self
+            .expires_in
+            .context("Connections did not return a token expiry.")?;
+        let refresh_token = self
+            .refresh_token
+            .context("Connections did not return a refresh token.")?;
+        if self.connections_contract != CONTRACT
+            || !self.token_type.eq_ignore_ascii_case("bearer")
+            || !self.access_token.starts_with("cma_")
+            || !refresh_token.starts_with("cmr_")
+            || seconds <= 0
+            || seconds > 300
+        {
+            return Err(anyhow!(
+                "Connections returned an unsupported Meetings token response."
+            ));
+        }
+        Ok(StoredTokens {
+            identity: session.operation_identity(),
+            access_token: self.access_token,
+            refresh_token,
+            expires_at: session
+                .expires_at
+                .min(chrono::Utc::now().timestamp() + seconds),
+        })
+    }
 }
 
 async fn launch_authorization(
@@ -541,7 +594,9 @@ mod macos_web_auth {
                 .lock()
                 .map_err(|_| anyhow!("The macOS authentication session lock is unavailable."))?;
             if pending.is_some() {
-                return Err(anyhow!("A Clerk authentication session is already open."));
+                return Err(anyhow!(
+                    "A Connections authentication session is already open."
+                ));
             }
             *pending = Some(sender);
         }
@@ -587,45 +642,11 @@ mod macos_web_auth {
     }
 }
 
-fn portal_url(base: &str, path: &str, return_url: &str) -> Result<String> {
-    let mut url = Url::parse(base)?.join(path)?;
-    url.query_pairs_mut()
-        .append_pair("redirect_url", return_url);
-    Ok(url.to_string())
-}
-
 fn issuer() -> Result<String> {
-    config_value(
-        "MEETINGLY_CLERK_ISSUER",
-        option_env!("MEETINGLY_CLERK_ISSUER"),
-    )
-}
-
-fn account_portal_url() -> Result<String> {
-    config_value(
-        "MEETINGLY_CLERK_ACCOUNT_PORTAL_URL",
-        option_env!("MEETINGLY_CLERK_ACCOUNT_PORTAL_URL"),
-    )
-}
-
-fn client_id() -> Result<String> {
-    config_value(
-        "MEETINGLY_CLERK_OAUTH_CLIENT_ID",
-        option_env!("MEETINGLY_CLERK_OAUTH_CLIENT_ID"),
-    )
-}
-
-fn config_value(name: &str, built: Option<&str>) -> Result<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            built
-                .map(str::to_string)
-                .filter(|value| !value.trim().is_empty())
-        })
-        .map(|value| value.trim_end_matches('/').to_string())
-        .ok_or_else(|| anyhow!("{name} is not configured."))
+    Ok(format!(
+        "{}/api/identity",
+        normalized_origin(&connections_url())?
+    ))
 }
 
 fn random_urlsafe(bytes: usize) -> String {
@@ -636,7 +657,13 @@ fn random_urlsafe(bytes: usize) -> String {
 
 fn load_tokens() -> Result<StoredTokens> {
     let value = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)?.get_password()?;
-    Ok(serde_json::from_str(&value)?)
+    let tokens: StoredTokens = serde_json::from_str(&value)?;
+    if tokens.identity.issuer != issuer()? {
+        return Err(anyhow!(
+            "Stored tokens belong to another Connections issuer. Sign in again."
+        ));
+    }
+    Ok(tokens)
 }
 
 fn save_tokens(tokens: &StoredTokens) -> Result<()> {
@@ -674,7 +701,9 @@ fn recording_identity() -> Option<OperationIdentity> {
 }
 
 fn current_operation_identity() -> Option<OperationIdentity> {
-    current_session().map(|session| OperationIdentity::new(session.clerk_org_id, session.user_id))
+    current_session()
+        .filter(|session| issuer().ok().as_deref() == Some(session.issuer.as_str()))
+        .map(|session| session.operation_identity())
 }
 
 fn clear_recording_identity() {
@@ -687,7 +716,9 @@ fn clear_recording_identity() {
 pub(crate) fn set_test_session(identity: Option<OperationIdentity>) {
     set_current_session(identity.map(|identity| AuthSession {
         user_id: identity.user_id,
-        clerk_org_id: identity.clerk_org_id,
+        issuer: identity.issuer,
+        organization_id: identity.organization_id,
+        workspace_id: identity.workspace_id,
         expires_at: i64::MAX,
     }));
 }
@@ -714,9 +745,9 @@ pub(crate) fn finish_recording_identity_if_matches(identity: &OperationIdentity)
     true
 }
 
-fn ensure_organization_switching_allowed() -> std::result::Result<(), String> {
+fn ensure_workspace_switching_allowed() -> std::result::Result<(), String> {
     if recording_identity().is_some() {
-        Err("Stop and finish saving the active recording before switching organizations or signing out.".to_string())
+        Err("Stop and finish saving the active recording before switching workspaces or signing out.".to_string())
     } else {
         Ok(())
     }
@@ -729,6 +760,62 @@ fn display_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_cannot_commit_if_recording_started_during_exchange() {
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        reset_test_auth();
+        let original = OperationIdentity::new(
+            "https://connections.fractals-solutions.com/api/identity",
+            "company-a",
+            "A1",
+            "user-a",
+        );
+        set_test_session(Some(original.clone()));
+        begin_operation_identity().unwrap().commit();
+        let replacement = AuthSession {
+            user_id: "user-a".into(),
+            issuer: original.issuer.clone(),
+            organization_id: "company-b".into(),
+            workspace_id: "B1".into(),
+            expires_at: i64::MAX,
+        };
+        let tokens = StoredTokens {
+            identity: replacement.operation_identity(),
+            access_token: "unused-access".into(),
+            refresh_token: "unused-refresh".into(),
+            expires_at: i64::MAX,
+        };
+        assert!(commit_authorized_session(&tokens, &replacement).is_err());
+        assert_eq!(current_operation_identity(), Some(original.clone()));
+        assert_eq!(recording_identity(), Some(original));
+        reset_test_auth();
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_callback_cannot_restore_signed_out_session() {
+        let _state = AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        reset_test_auth();
+        *PENDING.write().unwrap() = Some(PendingAuthorization {
+            state: "original-state".into(),
+            verifier: "unused-verifier".into(),
+            issuer: "https://connections.fractals-solutions.com/api/identity".into(),
+            resource: "https://connections.fractals-solutions.com/api/meetings".into(),
+        });
+        clear_pending_authorization().unwrap();
+        let callback = Url::parse("meetingly://oauth/callback?code=delayed-code&state=original-state&iss=https%3A%2F%2Fconnections.fractals-solutions.com%2Fapi%2Fidentity").unwrap();
+        assert!(finish_authorization(callback)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("No sign-in is pending"));
+        assert!(current_session().is_none());
+        reset_test_auth();
+    }
 
     #[test]
     fn macos_authentication_owns_the_callback_session() {
@@ -747,61 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn validates_callback_and_audience_shapes() {
-        let _state = AUTH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert!(audience_contains(&serde_json::json!("client"), "client"));
-        assert!(audience_contains(
-            &serde_json::json!(["other", "client"]),
-            "client"
-        ));
-        assert!(!audience_contains(&serde_json::json!(["other"]), "client"));
-        let url = Url::parse("meetingly://oauth/callback?code=x&state=y").unwrap();
-        assert_eq!(url.host_str(), Some("oauth"));
-        assert_eq!(url.path(), "/callback");
-    }
-
-    #[test]
-    fn builds_account_portal_urls_from_the_portal_host() {
-        let return_url =
-            "https://immense-parrot-83.clerk.accounts.dev/oauth/authorize?client_id=client";
-        assert_eq!(
-            portal_url(
-                "https://immense-parrot-83.accounts.dev",
-                "user",
-                return_url
-            )
-            .unwrap(),
-            "https://immense-parrot-83.accounts.dev/user?redirect_url=https%3A%2F%2Fimmense-parrot-83.clerk.accounts.dev%2Foauth%2Fauthorize%3Fclient_id%3Dclient"
-        );
-        assert_eq!(
-            portal_url(
-                "https://immense-parrot-83.accounts.dev/",
-                "organization",
-                return_url
-            )
-            .unwrap(),
-            "https://immense-parrot-83.accounts.dev/organization?redirect_url=https%3A%2F%2Fimmense-parrot-83.clerk.accounts.dev%2Foauth%2Fauthorize%3Fclient_id%3Dclient"
-        );
-    }
-
-    #[test]
-    fn parses_clerk_oauth_access_claims_without_audience() {
-        let claims: AccessClaims = serde_json::from_value(serde_json::json!({
-            "sub": "user-a",
-            "org_id": "org-a",
-            "azp": "meetings-client",
-            "exp": i64::MAX,
-            "iss": "https://clerk.example"
-        }))
-        .unwrap();
-
-        assert_eq!(claims.sub, "user-a");
-        assert_eq!(claims.org_id, "org-a");
-    }
-
-    #[test]
     fn recording_identity_stays_bound_to_starting_organization() {
         let _state = AUTH_TEST_MUTEX
             .lock()
@@ -809,24 +841,36 @@ mod tests {
         clear_recording_identity();
         set_current_session(Some(AuthSession {
             user_id: "user-a".to_string(),
-            clerk_org_id: "org-a".to_string(),
+            issuer: "https://connections.fractals-solutions.com/api/identity".to_string(),
+            organization_id: "company-a".to_string(),
+            workspace_id: "A1".to_string(),
             expires_at: i64::MAX,
         }));
         let guard = begin_recording_identity().unwrap();
         guard.commit();
         set_current_session(Some(AuthSession {
             user_id: "user-b".to_string(),
-            clerk_org_id: "org-b".to_string(),
+            issuer: "https://connections.fractals-solutions.com/api/identity".to_string(),
+            organization_id: "company-b".to_string(),
+            workspace_id: "B1".to_string(),
             expires_at: i64::MAX,
         }));
-        assert_eq!(require_clerk_org_id().unwrap(), "org-a");
+        assert_eq!(require_operation_identity().unwrap().workspace_id, "A1");
         assert_eq!(require_user_id().unwrap(), "user-a");
-        assert_eq!(require_current_clerk_org_id().unwrap(), "org-b");
+        assert_eq!(
+            require_current_operation_identity().unwrap().workspace_id,
+            "B1"
+        );
         assert!(auth_finish_recording_scope().is_err());
         assert!(finish_recording_identity_if_matches(
-            &OperationIdentity::new("org-a", "user-a")
+            &OperationIdentity::new(
+                "https://connections.fractals-solutions.com/api/identity",
+                "company-a",
+                "A1",
+                "user-a"
+            )
         ));
-        assert_eq!(require_clerk_org_id().unwrap(), "org-b");
+        assert_eq!(require_operation_identity().unwrap().workspace_id, "B1");
         set_current_session(None);
     }
 
@@ -838,20 +882,37 @@ mod tests {
         clear_recording_identity();
         set_current_session(Some(AuthSession {
             user_id: "user-a".to_string(),
-            clerk_org_id: "org-a".to_string(),
+            issuer: "https://connections.fractals-solutions.com/api/identity".to_string(),
+            organization_id: "company-a".to_string(),
+            workspace_id: "A1".to_string(),
             expires_at: i64::MAX,
         }));
         begin_recording_identity().unwrap().commit();
 
         assert!(!finish_recording_identity_if_matches(
-            &OperationIdentity::new("org-a", "user-b")
+            &OperationIdentity::new(
+                "https://connections.fractals-solutions.com/api/identity",
+                "company-a",
+                "A1",
+                "user-b"
+            )
         ));
         assert_eq!(
             recording_identity(),
-            Some(OperationIdentity::new("org-a", "user-a"))
+            Some(OperationIdentity::new(
+                "https://connections.fractals-solutions.com/api/identity",
+                "company-a",
+                "A1",
+                "user-a"
+            ))
         );
         assert!(finish_recording_identity_if_matches(
-            &OperationIdentity::new("org-a", "user-a")
+            &OperationIdentity::new(
+                "https://connections.fractals-solutions.com/api/identity",
+                "company-a",
+                "A1",
+                "user-a"
+            )
         ));
         assert_eq!(recording_identity(), None);
         set_current_session(None);

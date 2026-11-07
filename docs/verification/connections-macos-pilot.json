@@ -1,0 +1,39 @@
+{
+  "runId": 42425541892,
+  "commit": "395c63939ecf4b24ed662d15dd8cc789d0a12e86",
+  "artifactId": 13595646488,
+  "artifactDigest": "sha256:bf698d3cd3af5e58ea772aec4861f6f39a40140c22e57e61ba14b75395430ffe",
+  "archiveBytes": 65739174,
+  "crc": "all outer and inner ZIP entries passed",
+  "verification": {
+    "identifier": "com.meetily.connections-pilot",
+    "minimumOS": "14.2",
+    "callbackScheme": "meetingly",
+    "microphonePermission": true,
+    "binaries": [
+      {
+        "name": "meetily",
+        "cpuType": "0x100000c",
+        "minimumOS": "14.2.0",
+        "bytes": 163911712
+      },
+      {
+        "name": "llama-helper",
+        "cpuType": "0x100000c",
+        "minimumOS": "14.2.0",
+        "bytes": 6893056
+      },
+      {
+        "name": "ffmpeg",
+        "cpuType": "0x100000c",
+        "minimumOS": "12.0.0",
+        "bytes": 51271200
+      }
+    ]
+  },
+  "limits": [
+    "unsigned debug pilot; no published release or updater",
+    "macOS Apple Silicon 14.2+",
+    "native keychain, capture and paired staging/offline upload remain unverified"
+  ]
+}

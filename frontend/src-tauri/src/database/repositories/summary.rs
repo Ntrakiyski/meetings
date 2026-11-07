@@ -26,14 +26,14 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         let mut transaction = pool.begin().await?;
 
-        let clerk_org_id = current_org()?;
+        let scope_key = current_scope()?;
         let meeting_exists: bool =
-            sqlx::query("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
-            .bind(meeting_id)
-                .bind(&clerk_org_id)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .is_some();
+            sqlx::query("SELECT 1 FROM meetings WHERE id = ? AND ownership_key = ?")
+                .bind(meeting_id)
+                .bind(&scope_key)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .is_some();
 
         if !meeting_exists {
             log_info!(
@@ -59,10 +59,10 @@ impl SummaryProcessesRepository {
             .execute(&mut *transaction)
             .await?;
 
-        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ? AND clerk_org_id = ?")
+        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ? AND ownership_key = ?")
             .bind(now)
             .bind(meeting_id)
-            .bind(clerk_org_id)
+            .bind(scope_key)
             .execute(&mut *transaction)
             .await?;
 
@@ -235,14 +235,14 @@ async fn ensure_current_org_meeting(
     meeting_id: &str,
 ) -> Result<(), sqlx::Error> {
     let exists: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND clerk_org_id = ?")
+        sqlx::query_as("SELECT 1 FROM meetings WHERE id = ? AND ownership_key = ?")
             .bind(meeting_id)
-            .bind(current_org()?)
+            .bind(current_scope()?)
             .fetch_optional(pool)
             .await?;
     exists.map(|_| ()).ok_or(sqlx::Error::RowNotFound)
 }
 
-fn current_org() -> Result<String, sqlx::Error> {
-    crate::auth::require_clerk_org_id().map_err(|error| sqlx::Error::Protocol(error.to_string()))
+fn current_scope() -> Result<String, sqlx::Error> {
+    crate::auth::require_scope_key().map_err(|error| sqlx::Error::Protocol(error.to_string()))
 }
