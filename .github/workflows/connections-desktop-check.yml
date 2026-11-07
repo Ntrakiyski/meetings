@@ -47,6 +47,10 @@ jobs:
         working-directory: frontend
         run: pnpm build
       - name: Build the native sidecar
+        env:
+          # The IPC sidecar reads local models; its unused vendored HTTP library
+          # auto-detects runner OpenSSL headers incompatible with this pinned llama build.
+          CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: 'TRUE'
         run: |
           cargo build --locked -p llama-helper --features metal
           mkdir -p frontend/src-tauri/binaries
