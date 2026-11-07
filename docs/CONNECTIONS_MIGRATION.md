@@ -17,8 +17,8 @@ Before the historical destructive ownership migration runs, startup archives its
 - 18 production protocol, queue and migration tests passed through a portable Rust harness on Linux. Includes persistent SQLite close/reopen, repeated checked SQLx migrations, A1/A2/B1/issuer/user isolation, failed offline retries, immutable ownership and proof-based legacy recovery with conflicts.
 - Five frontend session/retry recovery tests passed with Node's test runner.
 - Cargo dependency metadata validates with `--locked`; OS keyring features and their required lockfile dependencies are included.
-- Full macOS CI [run 42424013632](https://github.com/Ntrakiyski/meetings/actions/runs/42424013632) passed at `7ea01da4dadf8d4636ebfc15463a20b0a9deaa42`: frozen frontend install/build, five frontend recovery tests, sidecar build, **28 native tests** across protocol/queue, legacy migration/recovery, auth, import and retained-save recovery, and the complete unsigned app build. The artifact's SHA-256 and every inner/outer ZIP CRC were verified locally. Its main app, llama helper and FFmpeg are Apple Silicon Mach-O executables.
-- Artifact review found that the original pilot bundle advertised macOS 10.13 while the linked main binary requires **14.2**. The pilot workflow now declares **macOS 14.2** and runs `scripts/check-macos-pilot.py` before packaging. The verifier checks the isolated identifier, native callback scheme, microphone description, executable sidecars, architecture consistency and actual Mach-O minimum versions. It rejects the original mismatch. A rebuilt artifact with this correction is pending CI.
+- Full macOS CI [run 42425541892](https://github.com/Ntrakiyski/meetings/actions/runs/42425541892) passed at `395c63939ecf4b24ed662d15dd8cc789d0a12e86`: frozen frontend install/build, five frontend recovery tests, sidecar build, **28 native tests** across protocol/queue, legacy migration/recovery, auth, import and retained-save recovery, and the complete unsigned app build. The artifact's SHA-256 and every inner/outer ZIP CRC were verified locally. Its main app, llama helper and FFmpeg are Apple Silicon Mach-O executables.
+- Artifact review found that the original pilot bundle advertised macOS 10.13 while the linked main binary requires **14.2**. The pilot workflow now declares **macOS 14.2** and runs `scripts/check-macos-pilot.py` before packaging. The verifier checks the isolated identifier, native callback scheme, microphone description, executable sidecars, architecture consistency and actual Mach-O minimum versions. It rejects the original mismatch. The corrected build passes this verifier in CI. Independent local inspection confirms the actual bundled minima: app/helper 14.2, FFmpeg 12.0, and bundle 14.2. [Artifact verification record](verification/connections-macos-pilot.json) includes the exact commit and checksum.
 - Session commits now hold the recording-state guard while saving tokens and updating the current session. A recording started during the OAuth exchange prevents a workspace switch. Sign-out cancels pending authorization while holding the token lock, preventing delayed callbacks from restoring the signed-out session; both behaviors have native regression tests. OS keychain access, actual capture and the paired staging pilot remain unverified. The workflow publishes only a CI artifact, without a release or update feed.
 
 The portable harness is diagnostic evidence, not an application build or paired desktop pilot. CI results must be recorded before the PR is marked ready.
@@ -27,7 +27,18 @@ The portable harness is diagnostic evidence, not an application build or paired 
 
 The current CI pilot targets **Apple Silicon Macs running macOS 14.2 or later**. This candidate does not establish Intel or Windows release compatibility.
 
+Download the [verified pilot artifact](https://github.com/Ntrakiyski/meetings/actions/runs/42425541892/artifacts/13595646488). The outer GitHub archive SHA-256 is `bf698d3cd3af5e58ea772aec4861f6f39a40140c22e57e61ba14b75395430ffe`. It contains `meetings-connections-pilot.zip` and the bundle verification JSON. Unpack both archive levels and place `Meetings Connections Pilot.app` in Downloads. The artifact is retained for 14 days; it is an unsigned debug candidate.
+
 Use the exact companion server commit deployed to an isolated HTTPS staging origin. Launch the unsigned pilot application with `MEETINGLY_CONNECTIONS_URL` set to that origin. Its application identifier is `com.meetily.connections-pilot`, so it uses a separate app data directory from the installed release. Use synthetic recordings/accounts. Do not copy a live database; use a consistent backup if testing legacy recovery.
+
+After the companion staging deployment is healthy and its exact server commit is recorded, launch from Terminal so the runtime issuer override reaches the native process:
+
+```sh
+MEETINGLY_CONNECTIONS_URL='https://connections-migration.159.69.35.245.sslip.io' \
+  "$HOME/Downloads/Meetings Connections Pilot.app/Contents/MacOS/meetily"
+```
+
+The URL above is the prepared staging origin, not evidence that it is deployed. Confirm it with the operator before signing in.
 
 1. Sign in, consent to A1 and verify identity. Wait more than five minutes and verify refresh.
 2. Start a short recording under A1, disconnect the network, stop and save. Preserve its external ID and local ownership.
